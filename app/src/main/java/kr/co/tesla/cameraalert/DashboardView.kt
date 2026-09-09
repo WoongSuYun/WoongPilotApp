@@ -25,9 +25,11 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
     onCheckKakao: () -> Unit, onTeslaLogin: () -> Unit, onTeslaLogout: () -> Unit,
     onWakeTesla: () -> Unit, onRefreshTesla: () -> Unit, onVoiceSettings: () -> Unit,
     onGeminiSettings: () -> Unit, onGeminiAudioLibrary: () -> Unit, onSafetyAlertSettings: () -> Unit,
+    onSpeedCameraAlertSettings: () -> Unit,
     onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit, onCameraList: () -> Unit, onClearPairing: () -> Unit,
     private val onExportTrips: () -> Unit, private val onImportTrips: () -> Unit,
-    private val onConfigureSheets: () -> Unit, private val onAppendSampleTrip: () -> Unit
+    private val onConfigureSheets: () -> Unit, private val onOpenSheets: () -> Unit,
+    private val onAppendSampleTrip: () -> Unit
 ) : ScrollView(context) {
     private val ink = Color.rgb(240, 244, 248)
     private val muted = Color.rgb(149, 164, 180)
@@ -257,7 +259,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
             addView(vehicleStatRow(teslaVehicleState, teslaLock)); space(7)
             addView(vehicleStatRow(teslaOutsideTemp, teslaInsideTemp)); space(7)
             addView(vehicleStatRow(teslaDoors, teslaSentry)); space(10)
-            teslaStatus.textSize = 12f; teslaStatus.setTextColor(muted); teslaStatus.text = "Tesla 로그인 후 자동 갱신됩니다."
+            teslaStatus.textSize = 12f; teslaStatus.setTextColor(muted); teslaStatus.text = "마지막 차량 정보를 표시합니다. 새로고침하면 갱신됩니다."
             addView(teslaStatus); space(12)
             teslaLoginAction = action("Tesla 계정 로그인", true, onTeslaLogin)
             addView(teslaLoginAction, LinearLayout.LayoutParams(-1, -2))
@@ -346,7 +348,8 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
             space(16)
             addView(action("Gemini AI 음성 설정", false, onGeminiSettings), LinearLayout.LayoutParams(-1, -2)); space(8)
             addView(action("Gemini 음성 보관함", false, onGeminiAudioLibrary), LinearLayout.LayoutParams(-1, -2)); space(8)
-            addView(action("안전 안내 항목 설정", false, onSafetyAlertSettings), LinearLayout.LayoutParams(-1, -2))
+            addView(action("안전 안내 항목 설정", false, onSafetyAlertSettings), LinearLayout.LayoutParams(-1, -2)); space(8)
+            addView(action("과속카메라 알림 설정", false, onSpeedCameraAlertSettings), LinearLayout.LayoutParams(-1, -2))
         }
         guidePage.addView(text("차량 연결 없이도 휴대폰 GPS·카카오 안전 안내를 사용할 수 있어요.\n화면을 꺼도 실행 중인 감시는 계속됩니다.", 12f, muted).apply {
             gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
@@ -358,10 +361,27 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
         val vinValue = prefs.getString("vin", "").orEmpty()
         val active = TripLedger.active(context)
         card(tripPage).apply {
-            addView(text(if (active == null) "다음 운행을 기다리고 있어요" else "운행을 자동 기록하고 있어요", 20f, ink, true))
+            addView(text(if (active == null) "다음 운행을 기다리고 있어요" else "● 운행 기록 중", 20f, ink, true))
             addView(text(if (active == null) "D/R 진입과 P 주차를 자동 감지합니다." else "시작 ${tripTime(active.optLong("startedAt"))} · P 주차 후 자동 저장", 13f, muted))
             space(12)
-            val controls = row()
+            val automaticMode = Switch(context).apply {
+                text = "자동 기록 모드 사용"
+                textSize = 16f
+                isChecked = prefs.getBoolean("trip_auto_enabled", false)
+                setPadding(0, dp(4), 0, dp(4))
+                setOnCheckedChangeListener { _, enabled ->
+                    prefs.edit().putBoolean("trip_auto_enabled", enabled)
+                        .putString("trip_status", if (enabled) "자동 기록 모드 켜짐 · 다음 운행 감지 대기" else "자동 기록 모드 꺼짐").apply()
+                    if (enabled) ContextCompat.startForegroundService(context, Intent(context, TripMonitorService::class.java))
+                    else context.stopService(Intent(context, TripMonitorService::class.java))
+                    renderTripLog()
+                }
+            }
+            addView(automaticMode)
+            addView(text(if (active != null) "● 운행 기록 중 · 주차 후 자동 저장됩니다"
+                else prefs.getString("trip_status", "자동 기록 모드가 꺼져 있습니다.").orEmpty(), 13f,
+                if (active != null) accent else muted, true))
+            val controls = row().apply { visibility = View.GONE }
             controls.addView(action("자동 기록 시작", true) {
                 prefs.edit().putBoolean("trip_auto_enabled", true).apply()
                 ContextCompat.startForegroundService(context, Intent(context, TripMonitorService::class.java))
@@ -378,6 +398,8 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
             addView(backup)
             space(8)
             addView(action("Google Sheets 로그인 · 자동 기록", false, onConfigureSheets), LinearLayout.LayoutParams(-1, -2))
+            space(8)
+            addView(action("연결된 Google Sheets 열기", false, onOpenSheets), LinearLayout.LayoutParams(-1, -2))
             space(8)
             addView(action("스프레드시트 샘플 운행 추가", false, onAppendSampleTrip), LinearLayout.LayoutParams(-1, -2))
             space(8)
@@ -428,6 +450,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
         }
     }
     private fun tripTime(time: Long) = SimpleDateFormat("M.d HH:mm", Locale.KOREA).format(Date(time))
+    fun refreshTripLog() = renderTripLog()
     fun updatePairing(paired: Boolean) {
         keyBadge.text = if (paired) "✓  키 등록됨" else "○  키 등록 필요"
         keyBadge.setTextColor(if (paired) accent else muted)

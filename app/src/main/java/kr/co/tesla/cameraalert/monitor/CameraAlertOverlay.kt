@@ -16,7 +16,7 @@ import android.widget.LinearLayout
 import android.widget.TextView
 import kr.co.tesla.cameraalert.MainActivity
 
-/** Brief, dismissible floating speed-camera badge. */
+/** A dismissible floating speed-camera badge. */
 object CameraAlertOverlay {
     private const val AUTO_DISMISS_MS = 12_000L
     private var windowManager: WindowManager? = null
@@ -25,12 +25,12 @@ object CameraAlertOverlay {
     private val handler = Handler(Looper.getMainLooper())
     private val autoDismiss = Runnable { hide() }
 
-    fun show(context: Context, distanceMeters: Int, limitKph: Int?) {
+    fun show(context: Context, distanceMeters: Int, limitKph: Int?, keepVisible: Boolean = false) {
         if (!Settings.canDrawOverlays(context)) return
         handler.removeCallbacks(autoDismiss)
         val text = badge ?: createBadge(context) ?: return
         text.text = "${limitKph?.toString() ?: "속도"}\n${distanceMeters.coerceAtLeast(0)}m"
-        handler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
+        if (!keepVisible) handler.postDelayed(autoDismiss, AUTO_DISMISS_MS)
     }
 
     fun hide() {

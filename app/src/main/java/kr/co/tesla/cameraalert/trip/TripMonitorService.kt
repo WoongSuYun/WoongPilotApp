@@ -21,9 +21,14 @@ class TripMonitorService : Service() {
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
-        if (intent?.action == STOP) { stopSelf(); return START_NOT_STICKY }
+        if (intent?.action == STOP) {
+            getSharedPreferences("settings", MODE_PRIVATE).edit()
+                .putBoolean("trip_auto_enabled", false).putString("trip_status", "자동 기록 모드 꺼짐").apply()
+            stopSelf(); return START_NOT_STICKY
+        }
         if (job?.isActive == true) return START_STICKY
         startForeground(ID, notification("차량 상태 확인 중…"))
+        update("자동 기록 모드 켜짐 · 다음 운행 감지 대기")
         job?.cancel()
         job = scope.launch {
             val vin = getSharedPreferences("settings", MODE_PRIVATE).getString("vin", "").orEmpty()
@@ -76,6 +81,7 @@ class TripMonitorService : Service() {
     }
 
     private fun update(text: String) {
+        getSharedPreferences("settings", MODE_PRIVATE).edit().putString("trip_status", text).apply()
         getSystemService(NotificationManager::class.java).notify(ID, notification(text))
     }
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, CHANNEL)

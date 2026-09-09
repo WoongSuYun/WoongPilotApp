@@ -1,13 +1,12 @@
 package kr.co.tesla.cameraalert.model
 
 import android.content.Context
-import android.media.ToneGenerator
 
-enum class OverspeedToneStyle(val label: String, val toneType: Int) {
-    SHORT_BEEP("짧은 띵", ToneGenerator.TONE_PROP_BEEP2),
-    DOUBLE_BEEP("이중 알림", ToneGenerator.TONE_PROP_BEEP),
-    ACK("확인음", ToneGenerator.TONE_PROP_ACK),
-    URGENT("강한 경고", ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD);
+enum class OverspeedToneStyle(val label: String) {
+    SHORT_BEEP("짧은 띵"),
+    DOUBLE_BEEP("이중 알림"),
+    ACK("확인음"),
+    URGENT("강한 경고");
 
     override fun toString(): String = label
 }
@@ -59,6 +58,21 @@ object SafetyAlertSettings {
     private const val PREFS = "safety_alert_settings"
     private const val OVERSPEED_TONE = "overspeed_tone"
     private const val OVERSPEED_TONE_STYLE = "overspeed_tone_style"
+    private const val SPEED_CAMERA_FIRST_ALERT_DISTANCE = "speed_camera_first_alert_distance"
+
+    /** The distances offered in the UI are deliberately fixed navigation-style milestones. */
+    val speedCameraFirstAlertDistances = listOf(300, 500, 700)
+
+    fun speedCameraFirstAlertDistance(context: Context): Int =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .getInt(SPEED_CAMERA_FIRST_ALERT_DISTANCE, 700)
+            .takeIf { it in speedCameraFirstAlertDistances } ?: 700
+
+    fun saveSpeedCameraFirstAlertDistance(context: Context, distanceMeters: Int) {
+        require(distanceMeters in speedCameraFirstAlertDistances)
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putInt(SPEED_CAMERA_FIRST_ALERT_DISTANCE, distanceMeters).apply()
+    }
 
     fun isEnabled(context: Context, type: SafetyAlertType): Boolean =
         context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

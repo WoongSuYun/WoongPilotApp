@@ -6,8 +6,6 @@ import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.*
-import android.media.AudioManager
-import android.media.ToneGenerator
 import android.net.ConnectivityManager
 import android.net.NetworkCapabilities
 import android.os.*
@@ -20,6 +18,7 @@ import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.kakao.KakaoSafetyMonitor
 import kr.co.tesla.cameraalert.model.*
 import kr.co.tesla.cameraalert.voice.AlertSpeaker
+import kr.co.tesla.cameraalert.voice.AppSoundPlayer
 import kr.co.tesla.cameraalert.voice.GeminiTts
 import kotlinx.coroutines.*
 
@@ -32,24 +31,37 @@ class CameraMonitorService : Service(), LocationListener {
     private var client: TeslaBleClient? = null
     private var cameras = emptyList<SpeedCamera>()
     private var vehicleConnected = false
+    // Tesla BLE can be briefly dropped while the car is awake.  Once this run has verified the
+    // vehicle, GPS safety monitoring must survive those reconnects.
+    private var vehicleVerifiedForMonitoring = false
     private var gpsActive = false
     private var lastFix = 0L
-    private var tone: ToneGenerator? = null
     private var lastOverspeedToneAt = 0L
     private var overspeedCameraId: String? = null
     private lateinit var speaker: AlertSpeaker
     private lateinit var geminiSpeaker: GeminiTts
+    private lateinit var sounds: AppSoundPlayer
     private val alerts = CameraAlertGate()
     private var activeCameraId: String? = null
     private var dismissedCameraId: String? = null
+    private var activeSpeedCamera: ActiveSpeedCamera? = null
     private var kakao: KakaoSafetyMonitor? = null
     private var kakaoTask: Job? = null
+
+    private data class ActiveSpeedCamera(
+        val id: String,
+        val latitude: Double,
+        val longitude: Double,
+        val limitKph: Int,
+        var closestDistanceMeters: Double = Double.POSITIVE_INFINITY
+    )
 
     override fun onCreate() {
         super.onCreate()
         running = true
         speaker = AlertSpeaker(this)
         geminiSpeaker = GeminiTts(this)
+        sounds = AppSoundPlayer(this)
         val notifications = getSystemService(NotificationManager::class.java)
         notifications.createNotificationChannel(NotificationChannel(
             CHANNEL, "카메라 감시 상태", NotificationManager.IMPORTANCE_LOW))
@@ -91,6 +103,7 @@ class CameraMonitorService : Service(), LocationListener {
                         client!!.run(vin, pairing, ::status) {
                             prefs.edit().putString("pairedVin", vin).apply()
                             vehicleConnected = true
+                            vehicleVerifiedForMonitoring = true
                             if (prefs.getBoolean("auto_monitor", true)) {
                                 status("키 등록 완료 · 카메라 감시를 자동 시작합니다")
                                 startGps()
@@ -106,8 +119,7 @@ class CameraMonitorService : Service(), LocationListener {
                         if (prefs.getString("pairedVin", "") != vin) {
                             status("등록 실패: ${e.message}"); stopSelf(); return@launch
                         }
-                        status("차량 연결이 끊겼습니다 · 키 등록은 완료됨 · 감시를 종료했습니다")
-                        stopSelf(); return@launch
+                        status("키 등록 완료 · 차량 연결이 끊겼습니다 · 휴대폰 GPS 감시 계속")
                     } finally { vehicleConnected = false; client?.close(); client = null }
                 }
                 if (allowManual) startGps()
@@ -123,15 +135,17 @@ class CameraMonitorService : Service(), LocationListener {
                         client!!.run(vin, false, ::status) {
                             prefs.edit().putString("pairedVin", vin).apply()
                             vehicleConnected = true
+                            vehicleVerifiedForMonitoring = true
                             startGps()
                         }
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
-                        status(if (allowManual) "차량 연결 안 됨 · 휴대폰 GPS·카카오 안내 계속 · 15초 후 재검색"
-                            else "등록된 차량 연결 대기 중 · 연결되면 감시를 자동 시작합니다")
+                        status(if (allowManual || vehicleVerifiedForMonitoring)
+                            "차량 연결이 끊겼습니다 · 휴대폰 GPS·카카오 안내 계속 · 15초 후 재연결"
+                        else "등록된 차량 연결 대기 중 · 연결되면 감시를 자동 시작합니다")
                     } finally {
                         vehicleConnected = false
-                        if (!allowManual) stopGps()
+                        if (!allowManual && !vehicleVerifiedForMonitoring) stopGps()
                         client?.close(); client = null
                     }
                     delay(15_000)
@@ -201,13 +215,22 @@ class CameraMonitorService : Service(), LocationListener {
     override fun onLocationChanged(fix: Location) {
         if (!gpsActive) return
         val ageMs = (SystemClock.elapsedRealtimeNanos() - fix.elapsedRealtimeNanos) / 1_000_000
-        if (ageMs !in 0..5_000 || !fix.hasAccuracy() || fix.accuracy > 40f ||
-            !fix.hasBearing() || !fix.hasSpeed() || fix.speed < 2f) {
-            status("휴대폰 GPS 감시 중 · 정차 또는 GPS 정확도 확인 중"); return
+        if (ageMs !in 0..5_000) {
+            status("휴대폰 GPS 감시 중 · 위치 신호 갱신 대기"); return
+        }
+        if (!fix.hasAccuracy() || fix.accuracy > 40f) {
+            status("휴대폰 GPS 감시 중 · 위치 정확도 확인 중"); return
+        }
+        if (!fix.hasSpeed() || fix.speed < 2f) {
+            status("차량 정차 중 · 카메라 감시 준비됨"); return
+        }
+        if (!fix.hasBearing()) {
+            status("주행 감지됨 · GPS 방향 확인 중"); return
         }
         lastFix = SystemClock.elapsedRealtime()
         val position = VehiclePosition(fix.latitude, fix.longitude, fix.bearing.toDouble(),
             fix.speed * 3.6, fix.time)
+        updateActiveSpeedCamera(position)
         val healthy = kakao?.healthy(isOnline()) == true
         val enabledTypes = SafetyAlertSettings.enabledTypes(this)
         val event = HybridAlerts.select(healthy,
@@ -217,7 +240,7 @@ class CameraMonitorService : Service(), LocationListener {
         prefs.edit().putString("camera_source", source).apply()
         if (event == null) {
             overspeedCameraId = null
-            CameraAlertOverlay.hide()
+            if (activeSpeedCamera == null) CameraAlertOverlay.hide()
             status("${position.speedKph.toInt()}km/h · $source"); return
         }
         val match = event.match
@@ -238,19 +261,29 @@ class CameraMonitorService : Service(), LocationListener {
         } else if (match.type == SafetyAlertType.SPEED_CAMERA) {
             overspeedCameraId = null
         }
-        if (alerts.shouldAlert(event, position.heading, now)) {
+        val announcedDistance = alerts.alertDistanceMeters(
+            event, position.heading, now,
+            SafetyAlertSettings.speedCameraFirstAlertDistance(this)
+        )
+        if (announcedDistance != null) {
             activeCameraId = match.id
             dismissedCameraId = null
-            status(detail)
-            CameraAlertNotification.show(this, detail)
-            if (prefs.getBoolean("floating_alert_enabled", false))
-                CameraAlertOverlay.show(this, match.distanceMeters.toInt(), match.limitKph)
+            val announcedDetail = detail.replaceFirst("${match.distanceMeters.toInt()}m", "${announcedDistance}m")
+            status(announcedDetail)
+            CameraAlertNotification.show(this, announcedDetail)
+            // The floating card is intentionally reserved for enforcement cameras: it needs a
+            // speed limit to be useful and should not cover navigation for other safety notices.
+            if (match.type == SafetyAlertType.SPEED_CAMERA && match.limitKph != null) {
+                activeSpeedCamera = ActiveSpeedCamera(match.id, match.latitude, match.longitude, match.limitKph)
+                if (prefs.getBoolean("floating_alert_enabled", false))
+                    CameraAlertOverlay.show(this, match.distanceMeters.toInt(), match.limitKph, keepVisible = true)
+            }
             scope.launch {
                 val geminiSpoken = runCatching {
-                    geminiSpeaker.speakSafetyWarning(match.type, match.distanceMeters.toInt(), match.limitKph)
+                    geminiSpeaker.speakSafetyWarning(match.type, announcedDistance, match.limitKph)
                 }.getOrDefault(false)
                 val systemSpoken = if (geminiSpoken) true else runCatching {
-                    speaker.speakSafetyWarning(match.type, match.distanceMeters.toInt(), match.limitKph)
+                    speaker.speakSafetyWarning(match.type, announcedDistance, match.limitKph)
                 }.getOrDefault(false)
                 if (!systemSpoken) playFallbackTone()
             }
@@ -260,16 +293,30 @@ class CameraMonitorService : Service(), LocationListener {
             status(detail)
         }
     }
-    private fun playFallbackTone() = runCatching {
-        tone?.release()
-        tone = ToneGenerator(AudioManager.STREAM_MUSIC, 90).also {
-            it.startTone(ToneGenerator.TONE_CDMA_ALERT_CALL_GUARD, 900)
+    private fun playFallbackTone() = sounds.playFallbackWarning()
+    private fun playOverspeedTone() = sounds.playOverspeed(SafetyAlertSettings.overspeedToneStyle(this))
+    /** Clears a camera only after GPS has reached its closest point and then moved away. */
+    private fun updateActiveSpeedCamera(position: VehiclePosition) {
+        val camera = activeSpeedCamera ?: return
+        val distance = CameraDetector.distanceMeters(position.latitude, position.longitude, camera.latitude, camera.longitude)
+        if (distance < camera.closestDistanceMeters) {
+            camera.closestDistanceMeters = distance
+        } else if (camera.closestDistanceMeters <= PASS_CONFIRMATION_RADIUS_METERS &&
+            distance >= camera.closestDistanceMeters + PASSING_AWAY_DELTA_METERS) {
+            activeSpeedCamera = null
+            if (activeCameraId == camera.id) activeCameraId = null
+            if (dismissedCameraId == camera.id) dismissedCameraId = null
+            CameraAlertOverlay.hide()
+            CameraAlertNotification.cancel(this)
+            playCameraPassedTone()
+            status("과속카메라를 통과했습니다")
+        }
+        if (activeSpeedCamera != null && dismissedCameraId != camera.id &&
+            prefs.getBoolean("floating_alert_enabled", false)) {
+            CameraAlertOverlay.show(this, distance.toInt(), camera.limitKph, keepVisible = true)
         }
     }
-    private fun playOverspeedTone() = runCatching {
-        if (tone == null) tone = ToneGenerator(AudioManager.STREAM_MUSIC, 90)
-        tone?.startTone(SafetyAlertSettings.overspeedToneStyle(this).toneType, 180)
-    }
+    private fun playCameraPassedTone() = sounds.playCameraPassed()
     override fun onProviderDisabled(provider: String) { if (gpsActive) status("GPS가 꺼졌습니다 · 위치를 켜 주세요") }
     override fun onProviderEnabled(provider: String) {}
     @Deprecated("Legacy callback")
@@ -290,7 +337,7 @@ class CameraMonitorService : Service(), LocationListener {
             .setAction(STOP), PendingIntent.FLAG_IMMUTABLE)).build()
     override fun onDestroy() {
         running = false
-        task?.cancel(); scope.cancel(); client?.close(); stopGps(); tone?.release(); speaker.shutdown(); geminiSpeaker.shutdown()
+        task?.cancel(); scope.cancel(); client?.close(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()
         CameraAlertNotification.cancel(this)
         CameraAlertOverlay.hide()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -300,6 +347,8 @@ class CameraMonitorService : Service(), LocationListener {
     companion object {
         const val CHANNEL = "local_camera_monitor"
         const val STOP = "stop_monitor"
+        private const val PASS_CONFIRMATION_RADIUS_METERS = 60.0
+        private const val PASSING_AWAY_DELTA_METERS = 15.0
         @Volatile private var running = false
         fun isRunning(): Boolean = running
     }

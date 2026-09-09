@@ -28,6 +28,21 @@ android {
         buildConfigField("String", "DATA_GO_KR_SERVICE_KEY", "\"${dataGoServiceKey.get()}\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
+    signingConfigs {
+        create("sharedDebug") {
+            // This is the existing debug key used by the installed WoongPilot builds. Keeping it
+            // in the private repository lets another PC create an APK that Android can update.
+            storeFile = rootProject.file("signing/woongpilot-debug.keystore")
+            storePassword = "android"
+            keyAlias = "androiddebugkey"
+            keyPassword = "android"
+        }
+    }
+    buildTypes {
+        getByName("debug") {
+            signingConfig = signingConfigs.getByName("sharedDebug")
+        }
+    }
     buildFeatures { buildConfig = true }
     compileOptions {
         sourceCompatibility = JavaVersion.VERSION_17

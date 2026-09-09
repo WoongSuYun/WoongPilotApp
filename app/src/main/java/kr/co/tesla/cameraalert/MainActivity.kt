@@ -33,6 +33,7 @@ import kr.co.tesla.cameraalert.trip.TripLedger
 import kr.co.tesla.cameraalert.trip.GoogleSheetsSync
 import kr.co.tesla.cameraalert.trip.SheetsWebhook
 import kr.co.tesla.cameraalert.voice.AlertSpeaker
+import kr.co.tesla.cameraalert.voice.AppSoundPlayer
 import kr.co.tesla.cameraalert.voice.GeminiTts
 import kotlinx.coroutines.*
 import java.util.Locale
@@ -50,6 +51,7 @@ class MainActivity : AppCompatActivity() {
     private lateinit var status: TextView
     private lateinit var alertSpeaker: AlertSpeaker
     private lateinit var geminiSpeaker: GeminiTts
+    private lateinit var sounds: AppSoundPlayer
     private var pendingPair: Boolean? = null
     private var pendingGoogleSheetId: String? = null
     private val googleSheetsLogin = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
@@ -83,6 +85,7 @@ class MainActivity : AppCompatActivity() {
             dashboard.updatePairingProgress(paired, prefs.getString("status", "").orEmpty())
         }
         if (key == "kakao_status") runOnUiThread { dashboard.kakaoStatus.text = prefs.getString("kakao_status", "연결 확인 전") }
+        if (key == "trip_status") runOnUiThread { dashboard.refreshTripLog() }
     }
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val pair = pendingPair ?: return@registerForActivityResult
@@ -122,6 +125,7 @@ class MainActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         alertSpeaker = AlertSpeaker(this)
         geminiSpeaker = GeminiTts(this)
+        sounds = AppSoundPlayer(this)
         // Remove settings left by the older backend build.
         prefs.edit().remove("backend").remove("vehicleId").remove("oauth_state").apply()
         val initialVin = prefs.getString("vin", "").orEmpty()
@@ -141,14 +145,19 @@ class MainActivity : AppCompatActivity() {
             onGeminiSettings = { showGeminiVoiceSettings() },
             onGeminiAudioLibrary = { showGeminiAudioLibrary() },
             onSafetyAlertSettings = { showSafetyAlertSettings() },
+            onSpeedCameraAlertSettings = { showSpeedCameraAlertSettings() },
             onPreviewCameraAlert = { previewCameraAlert() }, onMonitoringSettings = { showMonitoringSettings() },
             onCameraList = { startActivity(Intent(this, CameraListActivity::class.java)) },
             onClearPairing = { clearPairingForReregistration() },
             onExportTrips = { exportTrips.launch("tesla-trip-ledger.csv") },
             onImportTrips = { importTrips.launch(arrayOf("text/csv", "text/comma-separated-values", "application/csv")) },
-            onConfigureSheets = { showGoogleSheetsSettings() }, onAppendSampleTrip = { appendSampleTripRow() })
+            onConfigureSheets = { showGoogleSheetsSettings() }, onOpenSheets = { openGoogleSheet() },
+            onAppendSampleTrip = { appendSampleTripRow() })
         vin = dashboard.vin
         status = dashboard.status
+        TeslaVehicleCache.load(this, initialVin)?.let { snapshot ->
+            dashboard.updateTeslaOverview(initialVin, snapshot.data, lastTeslaUpdateMessage(snapshot.updatedAt))
+        }
         dashboard.kakaoStatus.text = "카카오 연결 확인 전"
         vin.addTextChangedListener(object : android.text.TextWatcher {
             override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
@@ -543,7 +552,90 @@ class MainActivity : AppCompatActivity() {
         render()
     }
 
+    /** Selects which Kakao safety-road notices are eligible for voice guidance. */
     private fun showSafetyAlertSettings() {
+        val padding = (20 * resources.displayMetrics.density).toInt()
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding / 2, padding, padding / 2)
+        }
+        panel.addView(TextView(this).apply {
+            text = "카카오 안전운행 안내에서 받을 항목만 선택하세요. 과속카메라의 안내 거리와 경고음은 별도 설정에서 관리합니다."
+            textSize = 13f
+            setPadding(0, 0, 0, padding / 2)
+        })
+        val switches = SafetyAlertType.entries.associateWith { type ->
+            Switch(this).apply {
+                text = type.label
+                textSize = 16f
+                isChecked = SafetyAlertSettings.isEnabled(this@MainActivity, type)
+                setPadding(0, padding / 4, 0, padding / 4)
+            }.also(panel::addView)
+        }
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("안전 안내 항목 설정")
+            .setView(ScrollView(this).apply { addView(panel) })
+            .setNegativeButton("취소", null)
+            .setPositiveButton("저장") { _, _ ->
+                SafetyAlertSettings.save(this, switches.mapValues { it.value.isChecked })
+                status.text = "안전 안내 항목을 저장했습니다. 다음 안내부터 적용됩니다."
+            }.show()
+    }
+
+    /** Settings that affect only speed-camera timing and the over-limit sound. */
+    private fun showSpeedCameraAlertSettings() {
+        val padding = (20 * resources.displayMetrics.density).toInt()
+        val panel = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(padding, padding / 2, padding, padding / 2)
+        }
+        panel.addView(TextView(this).apply {
+            text = "과속카메라 첫 안내 시점과 제한속도 초과 경고음을 설정합니다. 첫 안내 뒤에는 카메라를 지날 때까지 화면 안내가 유지됩니다."
+            textSize = 13f
+            setPadding(0, 0, 0, padding / 2)
+        })
+        val firstAlertDistance = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                SafetyAlertSettings.speedCameraFirstAlertDistances.map { "첫 안내 거리: ${it}m 전" })
+            setSelection(SafetyAlertSettings.speedCameraFirstAlertDistances.indexOf(
+                SafetyAlertSettings.speedCameraFirstAlertDistance(this@MainActivity)))
+        }
+        val overspeedTone = Switch(this).apply {
+            text = "제한속도 초과 경고음"
+            textSize = 16f
+            isChecked = SafetyAlertSettings.isOverspeedToneEnabled(this@MainActivity)
+            setPadding(0, padding / 2, 0, padding / 4)
+        }
+        val tonePicker = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, OverspeedToneStyle.entries)
+            setSelection(OverspeedToneStyle.entries.indexOf(SafetyAlertSettings.overspeedToneStyle(this@MainActivity)))
+        }
+        val previewTone = Button(this).apply {
+            text = "초과 경고음 미리 듣기"
+            isAllCaps = false
+            setOnClickListener {
+                sounds.playOverspeed(tonePicker.selectedItem as? OverspeedToneStyle ?: OverspeedToneStyle.SHORT_BEEP)
+            }
+        }
+        panel.addView(firstAlertDistance)
+        panel.addView(overspeedTone)
+        panel.addView(tonePicker)
+        panel.addView(previewTone)
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("과속카메라 알림 설정")
+            .setView(panel)
+            .setNegativeButton("취소", null)
+            .setPositiveButton("저장") { _, _ ->
+                SafetyAlertSettings.saveSpeedCameraFirstAlertDistance(this,
+                    SafetyAlertSettings.speedCameraFirstAlertDistances[firstAlertDistance.selectedItemPosition])
+                SafetyAlertSettings.saveOverspeedTone(this, overspeedTone.isChecked)
+                SafetyAlertSettings.saveOverspeedToneStyle(this,
+                    tonePicker.selectedItem as? OverspeedToneStyle ?: OverspeedToneStyle.SHORT_BEEP)
+                status.text = "과속카메라 알림 설정을 저장했습니다. 다음 안내부터 적용됩니다."
+            }.show()
+    }
+
+    private fun showLegacyCombinedSafetyAlertSettings() {
         val padding = (20 * resources.displayMetrics.density).toInt()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
@@ -562,6 +654,14 @@ class MainActivity : AppCompatActivity() {
                 setPadding(0, padding / 4, 0, padding / 4)
             }.also(panel::addView)
         }
+        val firstAlertDistance = Spinner(this).apply {
+            adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
+                SafetyAlertSettings.speedCameraFirstAlertDistances.map { "과속카메라 첫 안내: ${it}m 전" })
+            setSelection(SafetyAlertSettings.speedCameraFirstAlertDistances.indexOf(
+                SafetyAlertSettings.speedCameraFirstAlertDistance(this@MainActivity)))
+            setPadding(0, padding / 2, 0, padding / 4)
+        }
+        panel.addView(firstAlertDistance)
         val overspeedTone = Switch(this).apply {
             text = "과속카메라 제한속도 초과 경고음"
             textSize = 16f
@@ -578,9 +678,7 @@ class MainActivity : AppCompatActivity() {
             isAllCaps = false
             setOnClickListener {
                 val style = tonePicker.selectedItem as? OverspeedToneStyle ?: OverspeedToneStyle.SHORT_BEEP
-                val player = android.media.ToneGenerator(android.media.AudioManager.STREAM_MUSIC, 90)
-                player.startTone(style.toneType, 500)
-                android.os.Handler(android.os.Looper.getMainLooper()).postDelayed({ player.release() }, 700)
+                sounds.playOverspeed(style)
             }
         }
         panel.addView(tonePicker)
@@ -592,6 +690,8 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("취소", null)
             .setPositiveButton("저장") { _, _ ->
                 SafetyAlertSettings.save(this, switches.mapValues { it.value.isChecked })
+                SafetyAlertSettings.saveSpeedCameraFirstAlertDistance(this,
+                    SafetyAlertSettings.speedCameraFirstAlertDistances[firstAlertDistance.selectedItemPosition])
                 SafetyAlertSettings.saveOverspeedTone(this, overspeedTone.isChecked)
                 SafetyAlertSettings.saveOverspeedToneStyle(this,
                     tonePicker.selectedItem as? OverspeedToneStyle ?: OverspeedToneStyle.SHORT_BEEP)
@@ -705,6 +805,20 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+    private fun openGoogleSheet() {
+        val sheetId = GoogleSheetsSync.settings(this).sheetId
+        if (sheetId.isBlank()) {
+            Toast.makeText(this, "먼저 Google Sheets 로그인 · 자동 기록에서 스프레드시트를 연결해 주세요.", Toast.LENGTH_LONG).show()
+            return
+        }
+        val url = "https://docs.google.com/spreadsheets/d/$sheetId/edit"
+        runCatching {
+            startActivity(Intent(Intent.ACTION_VIEW, Uri.parse(url)))
+        }.onFailure {
+            Toast.makeText(this, "스프레드시트를 열 수 있는 앱 또는 브라우저를 찾지 못했습니다.", Toast.LENGTH_LONG).show()
+        }
+    }
+
     private fun appendSampleTripRow() {
         lifecycleScope.launch {
             val written = GoogleSheetsSync.appendTestRow(this@MainActivity)
@@ -866,6 +980,7 @@ class MainActivity : AppCompatActivity() {
                 lifecycleScope.launch {
                     dashboard.updateTeslaOverview("", null, "Tesla 계정 연결을 해제하는 중…")
                     runCatching { TeslaAuth.signOut(this@MainActivity) }
+                    TeslaVehicleCache.clear(this@MainActivity)
                     dashboard.updateTeslaAccount(false)
                     dashboard.updateTeslaOverview("", null, "Tesla 계정 연결이 해제되었습니다.")
                 }
@@ -898,8 +1013,7 @@ class MainActivity : AppCompatActivity() {
         repeat(4) { attempt ->
             val data = runCatching { TeslaAuth.vehicleData(this@MainActivity, currentVin) }
             if (data.isSuccess) {
-                dashboard.updateTeslaOverview(currentVin, data.getOrThrow(), "차량 온라인 · 5분마다 자동 갱신")
-                startTeslaRefresh()
+                renderTeslaData(currentVin, data.getOrThrow(), "차량 온라인 · 수동 새로고침으로 갱신")
                 return
             }
             if (attempt < 3) {
@@ -910,6 +1024,15 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
+    private fun renderTeslaData(vin: String, fresh: TeslaAuth.VehicleData, message: String) {
+        val previous = TeslaVehicleCache.load(this, vin)?.data
+        val merged = TeslaVehicleCache.merge(fresh, previous)
+        val snapshot = TeslaVehicleCache.save(this, vin, merged)
+        dashboard.updateTeslaOverview(vin, merged, "$message · ${lastTeslaUpdateMessage(snapshot.updatedAt)}")
+    }
+    private fun lastTeslaUpdateMessage(updatedAt: Long): String =
+        "마지막 갱신: ${java.text.SimpleDateFormat("MM-dd HH:mm", Locale.KOREA).format(java.util.Date(updatedAt))}"
+
     private fun startTeslaRefresh() {
         teslaRefresh?.cancel()
         val currentVin = prefs.getString("vin", "").orEmpty()
@@ -925,14 +1048,12 @@ class MainActivity : AppCompatActivity() {
         }
         updateTeslaVehicleName(currentVin)
         teslaRefresh = lifecycleScope.launch {
-            while (isActive) {
-                val data = runCatching { TeslaAuth.vehicleData(this@MainActivity, currentVin) }
-                data.onSuccess {
-                    dashboard.updateTeslaOverview(currentVin, it, "실행 중 · 5분마다 자동 갱신")
-                }.onFailure {
-                    dashboard.updateTeslaOverview(currentVin, null, it.message ?: "차량 정보를 가져오지 못했습니다.")
-                }
-                delay(5 * 60 * 1000L)
+            val data = runCatching { TeslaAuth.vehicleData(this@MainActivity, currentVin) }
+            data.onSuccess {
+                renderTeslaData(currentVin, it, "새로고침 완료")
+            }.onFailure {
+                dashboard.updateTeslaOverview(currentVin, null,
+                    "마지막 차량 정보를 표시 중 · ${it.message ?: "새로고침에 실패했습니다."}")
             }
         }
     }
@@ -997,7 +1118,7 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onStart() {
         super.onStart(); prefs.registerOnSharedPreferenceChangeListener(listener)
-        startTeslaRefresh()
+        if (TeslaVehicleCache.load(this, prefs.getString("vin", "").orEmpty()) == null) startTeslaRefresh()
         startTripRecorderIfEnabled()
         status.text = prefs.getString("status", "차량 키 등록부터 시작하세요.")
         dashboard.kakaoStatus.text = prefs.getString("kakao_status", "카카오 연결 확인 중…")
@@ -1019,6 +1140,10 @@ class MainActivity : AppCompatActivity() {
     override fun onStop() {
         teslaRefresh?.cancel(); teslaRefresh = null
         prefs.unregisterOnSharedPreferenceChangeListener(listener); super.onStop()
+    }
+    override fun onDestroy() {
+        sounds.release()
+        super.onDestroy()
     }
 }
 

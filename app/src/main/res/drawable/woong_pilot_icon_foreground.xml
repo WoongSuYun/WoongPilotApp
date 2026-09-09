@@ -3,4 +3,4 @@
     android:insetTop="8dp"
     android:insetRight="8dp"
     android:insetBottom="8dp"
-    android:drawable="@drawable/woong_pilot_rabbit" />
+    android:drawable="@drawable/rabbit" />

@@ -156,3 +156,78 @@ object TeslaAuth {
         } finally { connection.disconnect() }
     }
 }
+
+/** Last successfully obtained vehicle data, kept locally so a sleeping car does not blank the UI. */
+object TeslaVehicleCache {
+    data class Snapshot(val data: TeslaAuth.VehicleData, val updatedAt: Long)
+
+    private const val PREFS = "tesla_vehicle_cache"
+    private const val DATA = "data"
+    private const val VIN = "vin"
+    private const val UPDATED_AT = "updated_at"
+
+    fun load(context: Context, vin: String): Snapshot? = runCatching {
+        val prefs = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+        if (prefs.getString(VIN, "") != vin) return null
+        val json = JSONObject(prefs.getString(DATA, "") ?: return null)
+        Snapshot(fromJson(json), prefs.getLong(UPDATED_AT, 0L))
+    }.getOrNull()
+
+    fun save(context: Context, vin: String, data: TeslaAuth.VehicleData): Snapshot {
+        val snapshot = Snapshot(data, System.currentTimeMillis())
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit()
+            .putString(VIN, vin).putString(DATA, toJson(data).toString())
+            .putLong(UPDATED_AT, snapshot.updatedAt).apply()
+        return snapshot
+    }
+
+    fun clear(context: Context) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().clear().apply()
+    }
+
+    /** Tesla can return only a sleeping state. Keep the last real value for omitted fields. */
+    fun merge(fresh: TeslaAuth.VehicleData, previous: TeslaAuth.VehicleData?): TeslaAuth.VehicleData {
+        previous ?: return fresh
+        return fresh.copy(
+            batteryPercent = fresh.batteryPercent ?: previous.batteryPercent,
+            usableBatteryPercent = fresh.usableBatteryPercent ?: previous.usableBatteryPercent,
+            rangeKm = fresh.rangeKm ?: previous.rangeKm,
+            chargeState = fresh.chargeState ?: previous.chargeState,
+            chargingPowerKw = fresh.chargingPowerKw ?: previous.chargingPowerKw,
+            odometerKm = fresh.odometerKm ?: previous.odometerKm,
+            model = fresh.model ?: previous.model, trim = fresh.trim ?: previous.trim,
+            color = fresh.color ?: previous.color, locked = fresh.locked ?: previous.locked,
+            softwareStatus = fresh.softwareStatus ?: previous.softwareStatus,
+            softwareVersion = fresh.softwareVersion ?: previous.softwareVersion,
+            vehicleState = fresh.vehicleState ?: previous.vehicleState,
+            gear = fresh.gear ?: previous.gear, speedKph = fresh.speedKph ?: previous.speedKph,
+            sentryMode = fresh.sentryMode ?: previous.sentryMode, doorsOpen = fresh.doorsOpen ?: previous.doorsOpen,
+            outsideTempC = fresh.outsideTempC ?: previous.outsideTempC,
+            insideTempC = fresh.insideTempC ?: previous.insideTempC
+        )
+    }
+
+    private fun toJson(data: TeslaAuth.VehicleData) = JSONObject().apply {
+        put("batteryPercent", data.batteryPercent); put("usableBatteryPercent", data.usableBatteryPercent)
+        put("rangeKm", data.rangeKm); put("chargeState", data.chargeState); put("chargingPowerKw", data.chargingPowerKw)
+        put("odometerKm", data.odometerKm); put("model", data.model); put("trim", data.trim); put("color", data.color)
+        put("locked", data.locked); put("softwareStatus", data.softwareStatus); put("softwareVersion", data.softwareVersion)
+        put("vehicleState", data.vehicleState); put("gear", data.gear); put("speedKph", data.speedKph)
+        put("sentryMode", data.sentryMode); put("doorsOpen", data.doorsOpen)
+        put("outsideTempC", data.outsideTempC); put("insideTempC", data.insideTempC)
+    }
+
+    private fun fromJson(json: JSONObject) = TeslaAuth.VehicleData(
+        json.int("batteryPercent"), json.int("usableBatteryPercent"), json.int("rangeKm"),
+        json.text("chargeState"), json.int("chargingPowerKw"), json.double("odometerKm"),
+        json.text("model"), json.text("trim"), json.text("color"), json.bool("locked"),
+        json.text("softwareStatus"), json.text("softwareVersion"), json.text("vehicleState"),
+        json.text("gear"), json.int("speedKph"), json.bool("sentryMode"), json.bool("doorsOpen"),
+        json.double("outsideTempC"), json.double("insideTempC")
+    )
+
+    private fun JSONObject.text(key: String): String? = takeIf { has(key) && !isNull(key) }?.optString(key)
+    private fun JSONObject.int(key: String): Int? = takeIf { has(key) && !isNull(key) }?.optInt(key)
+    private fun JSONObject.double(key: String): Double? = takeIf { has(key) && !isNull(key) }?.optDouble(key)
+    private fun JSONObject.bool(key: String): Boolean? = takeIf { has(key) && !isNull(key) }?.optBoolean(key)
+}

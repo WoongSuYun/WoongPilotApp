@@ -22,16 +22,49 @@ object HybridAlerts {
 class CameraAlertGate {
     private data class Entry(val event: SourcedMatch, val heading: Double, val at: Long)
     private val recent = mutableListOf<Entry>()
-    fun shouldAlert(event: SourcedMatch, heading: Double, now: Long): Boolean {
+    /**
+     * Returns the distance that should be announced, or null for an already-announced camera.
+     *
+     * A normal approach is announced at the user's selected milestone rather than at the
+     * arbitrary GPS sample that happened to discover it.  When the driver reverses direction
+     * (for example after a U-turn), use a 100 m milestone so the new approach is never spoken
+     * as values such as 132 m or 232 m.
+     */
+    fun alertDistanceMeters(
+        event: SourcedMatch,
+        heading: Double,
+        now: Long,
+        speedCameraFirstAlertDistance: Int = 700
+    ): Int? {
         recent.removeAll { now - it.at !in 0..120_000 }
         val safety = event.match
-        val duplicate = recent.any {
+        val related = recent.filter {
             val other = it.event.match
-            val sameDirection = kotlin.math.abs((heading - it.heading + 540) % 360 - 180) <= 45
-            sameDirection && safety.type == other.type && ((event.source == it.event.source && safety.id == other.id) ||
+            safety.type == other.type && ((event.source == it.event.source && safety.id == other.id) ||
                 CameraDetector.distanceMeters(safety.latitude, safety.longitude, other.latitude, other.longitude) < 60)
         }
-        if (!duplicate) recent.add(Entry(event, heading, now))
-        return !duplicate
+        val duplicate = related.any { sameDirection(heading, it.heading) }
+        if (duplicate) return null
+
+        // Do not announce a normal camera approach before its selected milestone is crossed.
+        if (safety.type == SafetyAlertType.SPEED_CAMERA && related.isEmpty() &&
+            safety.distanceMeters > speedCameraFirstAlertDistance) return null
+
+        val reversedDirection = related.isNotEmpty()
+        recent.add(Entry(event, heading, now))
+        return when {
+            safety.type != SafetyAlertType.SPEED_CAMERA -> safety.distanceMeters.toInt().coerceAtLeast(1)
+            reversedDirection -> roundUpToHundred(safety.distanceMeters)
+            else -> speedCameraFirstAlertDistance
+        }
     }
+
+    fun shouldAlert(event: SourcedMatch, heading: Double, now: Long): Boolean =
+        alertDistanceMeters(event, heading, now) != null
+
+    private fun sameDirection(first: Double, second: Double): Boolean =
+        kotlin.math.abs((first - second + 540) % 360 - 180) <= 45
+
+    private fun roundUpToHundred(distanceMeters: Double): Int =
+        (kotlin.math.ceil(distanceMeters.coerceAtLeast(1.0) / 100.0) * 100).toInt()
 }

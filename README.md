@@ -224,7 +224,7 @@ app/build/outputs/apk/debug/app-debug.apk
 
 ## 보안 규칙
 
-- `local.properties`, 서명키(`.jks`, `.keystore`), PEM 파일, Worker secret은 커밋하지 않습니다.
+- `local.properties`, PEM 파일, Worker secret은 커밋하지 않습니다. `signing/woongpilot-debug.keystore`는 이 비공개 저장소에서 두 PC가 같은 debug APK로 업데이트할 수 있도록 의도적으로 포함합니다. 공개 저장소로 전환하거나 배포용 서명을 만들 때는 이 키를 제거하고 별도 release 키를 사용하세요.
 - Tesla client secret, access token, refresh token, Tesla backup passcode는 로그·스크린샷·이슈·채팅에 남기지 않습니다.
 - Gemini API 키도 로그·스크린샷·이슈·채팅에 남기지 않습니다. 키가 노출된 것으로 의심되면 Google AI Studio/Google Cloud에서 즉시 폐기하고 새 키로 교체합니다.
 - Cloudflare KV는 토큰 저장소이므로 권한을 최소화하고 Worker 로그에 세션 본문을 출력하지 않습니다.

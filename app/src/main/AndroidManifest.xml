@@ -16,8 +16,8 @@
     <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
     <application
         android:allowBackup="false"
-        android:icon="@drawable/ic_launcher"
-        android:roundIcon="@drawable/ic_launcher"
+        android:icon="@drawable/cream"
+        android:roundIcon="@drawable/cream"
         android:label="웅파일럿"
         android:theme="@style/Theme.CameraAlert">
         <activity android:name=".MainActivity" android:exported="true">

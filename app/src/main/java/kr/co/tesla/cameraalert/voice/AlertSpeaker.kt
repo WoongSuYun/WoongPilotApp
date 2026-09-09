@@ -2,9 +2,15 @@ package kr.co.tesla.cameraalert.voice
 
 import android.content.Context
 import android.media.AudioAttributes
+import android.media.MediaPlayer
+import android.os.Bundle
+import android.os.Handler
+import android.os.Looper
 import android.speech.tts.TextToSpeech
+import android.speech.tts.UtteranceProgressListener
 import android.speech.tts.Voice
 import kr.co.tesla.cameraalert.model.SafetyAlertType
+import java.io.File
 import java.util.Locale
 
 /** Uses the phone's installed Korean TTS engine, so camera warnings work without mobile data. */
@@ -16,6 +22,11 @@ class AlertSpeaker(context: Context) : TextToSpeech.OnInitListener {
     private val appContext = context.applicationContext
     private val prefs = appContext.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
     private var engine: TextToSpeech? = null
+    private var player: MediaPlayer? = null
+    private var synthesizedFile: File? = null
+    @Volatile private var activeUtteranceId: String? = null
+    private var utteranceSequence = 0L
+    private val mainHandler = Handler(Looper.getMainLooper())
     private var ready = false
     private val readyActions = mutableListOf<() -> Unit>()
 
@@ -32,6 +43,16 @@ class AlertSpeaker(context: Context) : TextToSpeech.OnInitListener {
                     .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
                     .build()
             )
+            engine?.setOnUtteranceProgressListener(object : UtteranceProgressListener() {
+                override fun onStart(utteranceId: String) = Unit
+                override fun onDone(utteranceId: String) {
+                    if (utteranceId == activeUtteranceId) mainHandler.post { playSynthesizedFile(utteranceId) }
+                }
+                @Deprecated("Deprecated in Java")
+                override fun onError(utteranceId: String) {
+                    if (utteranceId == activeUtteranceId) discardSynthesizedFile()
+                }
+            })
             applySavedSettings()
         }
         val actions = readyActions.toList()
@@ -79,7 +100,18 @@ class AlertSpeaker(context: Context) : TextToSpeech.OnInitListener {
         if (!ready) return false
         if (!force && !isEnabled()) return true
         configure(voiceName, rate)
-        return tts.speak(text, TextToSpeech.QUEUE_FLUSH, null, "camera_warning") == TextToSpeech.SUCCESS
+        tts.stop()
+        stopPlayback()
+        val output = runCatching { File.createTempFile("camera-warning-", ".wav", appContext.cacheDir) }
+            .getOrNull() ?: return false
+        synthesizedFile = output
+        val utteranceId = "$UTTERANCE_ID-${++utteranceSequence}"
+        activeUtteranceId = utteranceId
+        // The TTS engine creates only the audio data. Playback is then owned by this app, which
+        // lets Samsung's Separate app sound route it like Gemini's AudioTrack output.
+        val queued = tts.synthesizeToFile(text, Bundle(), output, utteranceId) == TextToSpeech.SUCCESS
+        if (!queued) discardSynthesizedFile()
+        return queued
     }
 
     private fun applySavedSettings() = configure(savedVoiceName(), savedRate())
@@ -97,8 +129,53 @@ class AlertSpeaker(context: Context) : TextToSpeech.OnInitListener {
         readyActions.clear()
         engine?.stop()
         engine?.shutdown()
+        stopPlayback()
         engine = null
         ready = false
+    }
+
+    private fun playSynthesizedFile(utteranceId: String) {
+        if (utteranceId != activeUtteranceId) return
+        val output = synthesizedFile ?: return
+        activeUtteranceId = null
+        val next = runCatching {
+            MediaPlayer().apply {
+                setAudioAttributes(AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_ASSISTANCE_NAVIGATION_GUIDANCE)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                    .build())
+                setDataSource(output.absolutePath)
+                setOnCompletionListener { releasePlayback(it) }
+                setOnErrorListener { media, _, _ -> releasePlayback(media); true }
+                prepare()
+            }
+        }.getOrNull() ?: run {
+            discardSynthesizedFile(); return
+        }
+        player = next
+        next.start()
+    }
+
+    private fun stopPlayback() {
+        val stop = {
+            player?.let { media -> runCatching { media.stop() }; media.release() }
+            player = null
+            discardSynthesizedFile()
+        }
+        if (Looper.myLooper() == Looper.getMainLooper()) stop() else mainHandler.post(stop)
+    }
+
+    private fun releasePlayback(media: MediaPlayer) {
+        val current = player === media
+        if (current) player = null
+        media.release()
+        if (current) discardSynthesizedFile()
+    }
+
+    private fun discardSynthesizedFile() {
+        activeUtteranceId = null
+        synthesizedFile?.delete()
+        synthesizedFile = null
     }
 
     private fun voiceLabel(voice: Voice, number: Int): String {
@@ -111,6 +188,7 @@ class AlertSpeaker(context: Context) : TextToSpeech.OnInitListener {
         private const val KEY_ENABLED = "voice_enabled"
         private const val KEY_VOICE = "voice_name"
         private const val KEY_RATE = "voice_rate"
+        private const val UTTERANCE_ID = "camera_warning"
         private const val PREVIEW = "전방 500미터, 제한속도 60킬로미터, 과속 단속 카메라입니다."
     }
 }
