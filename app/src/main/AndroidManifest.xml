@@ -1,0 +1,40 @@
+﻿<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+    <uses-permission android:name="android.permission.BLUETOOTH" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_ADMIN" android:maxSdkVersion="30" />
+    <uses-permission android:name="android.permission.BLUETOOTH_SCAN" />
+    <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+    <uses-permission android:name="android.permission.SYSTEM_ALERT_WINDOW" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_LOCATION" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CONNECTED_DEVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-feature android:name="android.hardware.bluetooth_le" android:required="true" />
+    <application
+        android:allowBackup="false"
+        android:icon="@mipmap/woong_pilot_icon"
+        android:roundIcon="@mipmap/woong_pilot_icon"
+        android:label="웅파일럿"
+        android:theme="@style/Theme.CameraAlert">
+        <activity android:name=".MainActivity" android:exported="true">
+            <intent-filter>
+                <action android:name="android.intent.action.MAIN" />
+                <category android:name="android.intent.category.LAUNCHER" />
+            </intent-filter>
+            <intent-filter>
+                <action android:name="android.intent.action.VIEW" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.BROWSABLE" />
+                <data android:scheme="woongpilot" android:host="oauth" android:path="/callback" />
+            </intent-filter>
+        </activity>
+        <activity android:name=".TripLogActivity" android:exported="false" />
+        <activity android:name=".CameraListActivity" android:exported="false" />
+        <service android:name=".monitor.CameraMonitorService" android:exported="false" android:foregroundServiceType="location|connectedDevice" />
+        <service android:name=".trip.TripMonitorService" android:exported="false" android:foregroundServiceType="dataSync" />
+    </application>
+</manifest>
