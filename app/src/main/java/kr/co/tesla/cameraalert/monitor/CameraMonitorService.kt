@@ -34,6 +34,7 @@ class CameraMonitorService : Service(), LocationListener {
     // Tesla BLE can be briefly dropped while the car is awake.  Once this run has verified the
     // vehicle, GPS safety monitoring must survive those reconnects.
     private var vehicleVerifiedForMonitoring = false
+    private var keepManualGpsWhenDisconnected = false
     private var gpsActive = false
     private var lastFix = 0L
     private var lastOverspeedToneAt = 0L
@@ -53,7 +54,9 @@ class CameraMonitorService : Service(), LocationListener {
         val latitude: Double,
         val longitude: Double,
         val limitKph: Int,
-        var closestDistanceMeters: Double = Double.POSITIVE_INFINITY
+        var closestDistanceMeters: Double = Double.POSITIVE_INFINITY,
+        var previousDistanceMeters: Double = Double.POSITIVE_INFINITY,
+        var movingAwaySamples: Int = 0
     )
 
     override fun onCreate() {
@@ -69,8 +72,7 @@ class CameraMonitorService : Service(), LocationListener {
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) {
-            prefs.edit().putBoolean("auto_monitor", false)
-                .putString("status", "감시를 중지했습니다.").apply()
+            prefs.edit().putString("status", "감시를 중지했습니다.").apply()
             stopSelf(); return START_NOT_STICKY
         }
         if (intent?.action == CameraAlertNotification.DISMISS_ACTION) {
@@ -90,6 +92,10 @@ class CameraMonitorService : Service(), LocationListener {
         val vin = prefs.getString("vin", "").orEmpty()
         val pairing = intent?.getBooleanExtra("pair", false) == true
         val allowManual = intent?.getBooleanExtra("allowManual", false) == true
+        // A driver-started manual session may intentionally continue without a Tesla connection.
+        // A D/R-triggered session, however, must return to vehicle search after P + disconnect.
+        keepManualGpsWhenDisconnected = allowManual &&
+            intent?.getBooleanExtra("stopWhenParked", false) != true
         task = scope.launch {
             previous?.join()
             try {
@@ -104,7 +110,7 @@ class CameraMonitorService : Service(), LocationListener {
                             prefs.edit().putString("pairedVin", vin).apply()
                             vehicleConnected = true
                             vehicleVerifiedForMonitoring = true
-                            if (prefs.getBoolean("auto_monitor", true)) {
+                            if (prefs.getBoolean("auto_monitor_enabled", true)) {
                                 status("키 등록 완료 · 카메라 감시를 자동 시작합니다")
                                 startGps()
                             } else {
@@ -132,7 +138,16 @@ class CameraMonitorService : Service(), LocationListener {
                 while (isActive) {
                     try {
                         client = TeslaBleClient(this@CameraMonitorService)
-                        client!!.run(vin, false, ::status) {
+                        client!!.run(vin, false, ::status, onConnected = {
+                            vehicleConnected = true
+                            vehicleVerifiedForMonitoring = true
+                            // Start on Tesla BLE connection; VCSEC key verification below is
+                            // retained for pairing-state validation, not as a start prerequisite.
+                            if (prefs.getBoolean("auto_monitor_enabled", true)) {
+                                status("차량 연결됨 · 카메라 감시를 자동 시작합니다")
+                                startGps()
+                            }
+                        }) {
                             prefs.edit().putString("pairedVin", vin).apply()
                             vehicleConnected = true
                             vehicleVerifiedForMonitoring = true
@@ -140,12 +155,15 @@ class CameraMonitorService : Service(), LocationListener {
                         }
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
-                        status(if (allowManual || vehicleVerifiedForMonitoring)
+                        val parked = vehicleIsParked()
+                        val keepGps = keepManualGpsWhenDisconnected || !parked
+                        status(if (keepGps && (allowManual || vehicleVerifiedForMonitoring))
                             "차량 연결이 끊겼습니다 · 휴대폰 GPS·카카오 안내 계속 · 15초 후 재연결"
-                        else "등록된 차량 연결 대기 중 · 연결되면 감시를 자동 시작합니다")
+                        else "차량 검색 중 · 연결되면 감시를 자동 시작합니다")
                     } finally {
                         vehicleConnected = false
-                        if (!allowManual && !vehicleVerifiedForMonitoring) stopGps()
+                        if (vehicleIsParked() && !keepManualGpsWhenDisconnected) stopGps()
+                        else if (!allowManual && !vehicleVerifiedForMonitoring) stopGps()
                         client?.close(); client = null
                     }
                     delay(15_000)
@@ -161,6 +179,7 @@ class CameraMonitorService : Service(), LocationListener {
         if (!gpsActive) {
             location.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
             gpsActive = true
+            monitoringActive = true
             startKakao()
             gpsWatchdog = scope.launch {
                 while (gpsActive && isActive) {
@@ -174,6 +193,7 @@ class CameraMonitorService : Service(), LocationListener {
     private fun stopGps() {
         vehicleConnected = false
         gpsActive = false
+        monitoringActive = false
         gpsWatchdog?.cancel(); gpsWatchdog = null
         kakaoTask?.cancel(); kakaoTask = null
         kakao?.stop(); kakao = null
@@ -246,6 +266,13 @@ class CameraMonitorService : Service(), LocationListener {
             status("${position.speedKph.toInt()}km/h · $source"); return
         }
         val match = event.match
+        // The event feed may continue returning the old camera after a turn.  A dismissed or
+        // route-departed camera must not keep producing the repeated overspeed tone.
+        if (match.type == SafetyAlertType.SPEED_CAMERA && dismissedCameraId == match.id) {
+            overspeedCameraId = null
+            status("${position.speedKph.toInt()}km/h · $source · 다음 카메라 안내 대기")
+            return
+        }
         val detail = buildString {
             if (match.type != SafetyAlertType.BUS_LANE) append("${match.distanceMeters.toInt()}m 앞 · ")
             if (match.type == SafetyAlertType.SPEED_CAMERA) append("${match.limitKph ?: "--"}km/h · ")
@@ -271,11 +298,22 @@ class CameraMonitorService : Service(), LocationListener {
             dismissedCameraId = null
             val announcedDetail = detail.replaceFirst("${match.distanceMeters.toInt()}m", "${announcedDistance}m")
             status(announcedDetail)
-            CameraAlertNotification.show(this, announcedDetail)
+            // Speed-camera/overspeed guidance is delivered by voice, the ongoing monitor
+            // notification, and the optional floating badge. Do not create a separate
+            // heads-up notification for it.
+            if (match.type == SafetyAlertType.SPEED_CAMERA) {
+                CameraAlertNotification.cancel(this)
+            } else {
+                CameraAlertNotification.show(this, announcedDetail)
+            }
             // The floating card is intentionally reserved for enforcement cameras: it needs a
             // speed limit to be useful and should not cover navigation for other safety notices.
             if (match.type == SafetyAlertType.SPEED_CAMERA && match.limitKph != null) {
-                activeSpeedCamera = ActiveSpeedCamera(match.id, match.latitude, match.longitude, match.limitKph)
+                activeSpeedCamera = ActiveSpeedCamera(
+                    match.id, match.latitude, match.longitude, match.limitKph,
+                    closestDistanceMeters = match.distanceMeters,
+                    previousDistanceMeters = match.distanceMeters
+                )
                 if (prefs.getBoolean("floating_alert_enabled", false))
                     CameraAlertOverlay.show(this, match.distanceMeters.toInt(), match.limitKph, keepVisible = true)
             }
@@ -296,21 +334,43 @@ class CameraMonitorService : Service(), LocationListener {
     }
     private fun playFallbackTone() = sounds.playFallbackWarning()
     private fun playOverspeedTone() = sounds.playOverspeed(SafetyAlertSettings.overspeedToneStyle(this))
-    /** Clears a camera only after GPS has reached its closest point and then moved away. */
+    /**
+     * Clears a camera after it has been passed, or when a turn takes the car away before it is
+     * reached. The latter needs consecutive GPS samples to avoid dismissing the badge from normal
+     * GPS drift while approaching the camera.
+     */
     private fun updateActiveSpeedCamera(position: VehiclePosition) {
         val camera = activeSpeedCamera ?: return
         val distance = CameraDetector.distanceMeters(position.latitude, position.longitude, camera.latitude, camera.longitude)
         if (distance < camera.closestDistanceMeters) {
             camera.closestDistanceMeters = distance
-        } else if (camera.closestDistanceMeters <= PASS_CONFIRMATION_RADIUS_METERS &&
-            distance >= camera.closestDistanceMeters + PASSING_AWAY_DELTA_METERS) {
+        }
+        // GPS arrives every second. At urban turning speeds the distance often grows only a
+        // few metres per sample, so requiring a 12 m jump in *each* sample never fired.
+        if (distance > camera.previousDistanceMeters + MOVING_AWAY_SAMPLE_DELTA_METERS) {
+            camera.movingAwaySamples++
+        } else if (distance < camera.previousDistanceMeters - MOVING_AWAY_SAMPLE_DELTA_METERS) {
+            camera.movingAwaySamples = 0
+        }
+        camera.previousDistanceMeters = distance
+
+        val passedCamera = camera.closestDistanceMeters <= PASS_CONFIRMATION_RADIUS_METERS &&
+            distance >= camera.closestDistanceMeters + PASSING_AWAY_DELTA_METERS
+        val turnedAwayBeforeCamera = camera.closestDistanceMeters > PASS_CONFIRMATION_RADIUS_METERS &&
+            camera.movingAwaySamples >= TURN_AWAY_CONFIRMATION_SAMPLES &&
+            distance >= camera.closestDistanceMeters + TURN_AWAY_DISTANCE_METERS
+        if (passedCamera || turnedAwayBeforeCamera) {
             activeSpeedCamera = null
             if (activeCameraId == camera.id) activeCameraId = null
-            if (dismissedCameraId == camera.id) dismissedCameraId = null
+            dismissedCameraId = camera.id
             CameraAlertOverlay.hide()
             CameraAlertNotification.cancel(this)
-            playCameraPassedTone()
-            status("과속카메라를 통과했습니다")
+            if (passedCamera) {
+                playCameraPassedTone()
+                status("과속카메라를 통과했습니다")
+            } else {
+                status("경로가 변경되어 과속카메라 안내를 종료했습니다")
+            }
         }
         if (activeSpeedCamera != null && dismissedCameraId != camera.id &&
             prefs.getBoolean("floating_alert_enabled", false)) {
@@ -329,6 +389,7 @@ class CameraMonitorService : Service(), LocationListener {
     private fun hasBluetoothPermission(): Boolean = Build.VERSION.SDK_INT < 31 ||
         (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
+    private fun vehicleIsParked(): Boolean = prefs.getString("vehicle_gear", "") == "P"
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, CHANNEL)
         .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Tesla 카메라 알림")
         .setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
@@ -338,6 +399,7 @@ class CameraMonitorService : Service(), LocationListener {
             .setAction(STOP), PendingIntent.FLAG_IMMUTABLE)).build()
     override fun onDestroy() {
         running = false
+        monitoringActive = false
         task?.cancel(); scope.cancel(); client?.close(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()
         CameraAlertNotification.cancel(this)
         CameraAlertOverlay.hide()
@@ -350,8 +412,25 @@ class CameraMonitorService : Service(), LocationListener {
         const val STOP = "stop_monitor"
         private const val PASS_CONFIRMATION_RADIUS_METERS = 60.0
         private const val PASSING_AWAY_DELTA_METERS = 15.0
+        // A small per-fix delta is intentional: at low-speed turns GPS positions are close
+        // together, while the 40 m total-distance requirement filters normal GPS drift.
+        private const val MOVING_AWAY_SAMPLE_DELTA_METERS = 2.0
+        private const val TURN_AWAY_CONFIRMATION_SAMPLES = 2
+        private const val TURN_AWAY_DISTANCE_METERS = 40.0
         @Volatile private var running = false
+        @Volatile private var monitoringActive = false
         fun isRunning(): Boolean = running
+        fun isMonitoringActive(): Boolean = monitoringActive
+
+        /** D/R reported by Tesla Fleet is a second, independent monitor-start signal. */
+        fun startForDriving(context: android.content.Context) {
+            // A foreground service can already be alive merely scanning for the vehicle. That
+            // does not mean GPS camera monitoring has started, so D/R must replace that scan.
+            if (isMonitoringActive()) return
+            ContextCompat.startForegroundService(context, Intent(context, CameraMonitorService::class.java)
+                .putExtra("allowManual", true)
+                .putExtra("stopWhenParked", true))
+        }
     }
 }
 

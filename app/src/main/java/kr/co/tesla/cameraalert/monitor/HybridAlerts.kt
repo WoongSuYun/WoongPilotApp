@@ -52,6 +52,10 @@ class CameraAlertGate {
     ): Int? {
         recent.removeAll { now - it.at !in 0..120_000 }
         val safety = event.match
+        // These two everyday notices are intentionally close-range only.  Until the car is
+        // within 100 m, leave no history entry so the first in-range fix can announce "100 m".
+        if (safety.type in setOf(SafetyAlertType.CHILDREN_ZONE, SafetyAlertType.SPEED_BUMP) &&
+            safety.distanceMeters > 100.0) return null
         val related = recent.filter {
             val other = it.event.match
             safety.type == other.type && ((event.source == it.event.source && safety.id == other.id) ||
@@ -69,7 +73,9 @@ class CameraAlertGate {
             now - recentTurnAt in 0..RECENT_TURN_WINDOW_MS
         recent.add(Entry(event, heading, now))
         return when {
-            safety.type != SafetyAlertType.SPEED_CAMERA -> safety.distanceMeters.toInt().coerceAtLeast(1)
+            // Safety-zone guidance should sound like navigation guidance too.  Never speak
+            // arbitrary GPS values such as "123 m ahead" for a children zone or sharp turn.
+            safety.type != SafetyAlertType.SPEED_CAMERA -> roundUpToHundred(safety.distanceMeters)
             reversedDirection || newlyRevealedAfterTurn -> roundUpToHundred(safety.distanceMeters)
             else -> speedCameraFirstAlertDistance
         }

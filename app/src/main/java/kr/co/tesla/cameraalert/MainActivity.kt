@@ -137,7 +137,6 @@ class MainActivity : AppCompatActivity() {
             onStart = { begin(false) },
             onStop = {
                 stopService(Intent(this, CameraMonitorService::class.java))
-                prefs.edit().putBoolean("auto_monitor", false).apply()
                 prefs.edit().putString("status", "감시를 중지했습니다.").apply()
             }, onCheckKakao = { checkKakao() }, onTeslaLogin = { TeslaAuth.start(this) },
             onTeslaLogout = { confirmTeslaLogout() }, onWakeTesla = { wakeTeslaAndRefresh() },
@@ -239,7 +238,7 @@ class MainActivity : AppCompatActivity() {
         panel.addView(speed, LinearLayout.LayoutParams(-1, -2))
         val autoMonitor = Switch(this).apply {
             text = "앱을 열면 감시 자동 시작"
-            isChecked = prefs.getBoolean("auto_monitor", true)
+            isChecked = prefs.getBoolean("auto_monitor_enabled", true)
             textSize = 16f
             setPadding(0, padding, 0, 0)
         }
@@ -255,7 +254,7 @@ class MainActivity : AppCompatActivity() {
             .setNeutralButton("미리 듣기", null)
             .setPositiveButton("저장") { _, _ ->
                 alertSpeaker.save(enabled.isChecked, selectedVoice().name, selectedRate())
-                prefs.edit().putBoolean("auto_monitor", autoMonitor.isChecked).apply()
+                prefs.edit().putBoolean("auto_monitor_enabled", autoMonitor.isChecked).apply()
             }.show()
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
             if (!alertSpeaker.preview(selectedVoice().name, selectedRate()))
@@ -1073,7 +1072,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("취소", null)
             .setPositiveButton("삭제") { _, _ ->
                 runCatching { VehicleKey.remove(value) }
-                prefs.edit().remove("pairedVin").putBoolean("auto_monitor", false).apply()
+                prefs.edit().remove("pairedVin").putBoolean("auto_monitor_enabled", false).apply()
                 dashboard.updatePairing(false)
                 dashboard.updatePairingProgress(false, "")
                 status.text = "앱 키 등록을 삭제했습니다. 카드키로 새로 등록하세요."
@@ -1090,7 +1089,7 @@ class MainActivity : AppCompatActivity() {
         if (pair) dashboard.updatePairingProgress(false, "등록 시작")
         vin.setText(value)
         prefs.edit().putString("vin", value).apply()
-        prefs.edit().putBoolean("auto_monitor", true).apply()
+        prefs.edit().putBoolean("auto_monitor_enabled", true).apply()
         val permissions = requiredPermissions(includeBluetooth = pair || alreadyPaired)
         if (permissions.any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
             pendingPair = pair; this.permissions.launch(permissions); return
@@ -1106,7 +1105,7 @@ class MainActivity : AppCompatActivity() {
             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
     private fun startAutoMonitorIfReady() {
-        if (!prefs.getBoolean("auto_monitor", true) || CameraMonitorService.isRunning()) return
+        if (!prefs.getBoolean("auto_monitor_enabled", true) || CameraMonitorService.isRunning()) return
         val savedVin = prefs.getString("vin", "").orEmpty()
         if (!TeslaProtocol.validVin(savedVin) || prefs.getString("pairedVin", "") != savedVin) return
         if (requiredPermissions(includeBluetooth = true).any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
@@ -1125,7 +1124,8 @@ class MainActivity : AppCompatActivity() {
         startAutoMonitorIfReady()
     }
     private fun startTripRecorderIfEnabled() {
-        if (!prefs.getBoolean("trip_auto_enabled", false) || !TeslaAuth.isSignedIn(this) ||
+        if ((!prefs.getBoolean("trip_auto_enabled", false) && !prefs.getBoolean("auto_monitor_enabled", true)) ||
+            !TeslaAuth.isSignedIn(this) ||
             prefs.getString("vin", "").orEmpty().length != 17) return
         ContextCompat.startForegroundService(this, Intent(this, kr.co.tesla.cameraalert.trip.TripMonitorService::class.java))
     }

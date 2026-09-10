@@ -10,3 +10,12 @@ build/
 *.pem
 *.apk
 *.aab
+
+# Local Android/Gradle tooling and build-session caches
+.android-sdk/
+.android-user/
+.gradle-user/
+.build-apk*.out
+.build-apk*.err
+commandlinetools-*.zip
+repository*.xml

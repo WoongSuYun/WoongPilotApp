@@ -63,4 +63,22 @@ class HybridAlertsTest {
             match = event(CameraSource.KAKAO, "new-camera").match.copy(distanceMeters = 132.0))
         assertEquals(200, gate.alertDistanceMeters(closeCamera, 90.0, 3_000, 700))
     }
+
+    @Test fun `children zone warning rounds its GPS distance up to a hundred metres`() {
+        val gate = CameraAlertGate()
+        val childrenZone = event(CameraSource.KAKAO, "children-zone").copy(
+            match = event(CameraSource.KAKAO, "children-zone").match.copy(
+                type = SafetyAlertType.CHILDREN_ZONE, distanceMeters = 123.0, limitKph = null))
+        assertEquals(200, gate.alertDistanceMeters(childrenZone, 10.0, 1_000, 700))
+    }
+
+    @Test fun `children zone waits until it is within one hundred metres`() {
+        val gate = CameraAlertGate()
+        val childrenZone = event(CameraSource.KAKAO, "children-zone").copy(
+            match = event(CameraSource.KAKAO, "children-zone").match.copy(
+                type = SafetyAlertType.CHILDREN_ZONE, distanceMeters = 101.0, limitKph = null))
+        assertNull(gate.alertDistanceMeters(childrenZone, 10.0, 1_000, 700))
+        assertEquals(100, gate.alertDistanceMeters(childrenZone.copy(
+            match = childrenZone.match.copy(distanceMeters = 99.0)), 10.0, 2_000, 700))
+    }
 }

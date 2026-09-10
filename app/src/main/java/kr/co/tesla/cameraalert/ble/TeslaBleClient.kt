@@ -57,7 +57,13 @@ class TeslaBleClient(private val context: Context) {
         }
     }
 
-    suspend fun run(vin: String, pair: Boolean, status: (String) -> Unit, verified: () -> Unit) {
+    suspend fun run(
+        vin: String,
+        pair: Boolean,
+        status: (String) -> Unit,
+        onConnected: () -> Unit = {},
+        verified: () -> Unit
+    ) {
         try {
             val key = VehicleKey.publicKey(vin)
             status("차량 검색 중…")
@@ -81,6 +87,8 @@ class TeslaBleClient(private val context: Context) {
             status("차량 연결 중…")
             gatt = device.connectGatt(context, false, callback, BluetoothDevice.TRANSPORT_LE)
             withTimeout(15_000) { connected.await() }
+            // The VIN-specific Tesla BLE connection is an independent monitor-start signal.
+            onConnected()
             check(gatt!!.discoverServices()) { "차량 서비스 검색 시작 실패" }
             withTimeout(12_000) { discovered.await() }
             val service = gatt!!.getService(SERVICE) ?: error("Tesla BLE 서비스를 찾지 못했습니다")
