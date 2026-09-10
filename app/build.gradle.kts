@@ -22,8 +22,8 @@ android {
         applicationId = "kr.co.tesla.cameraalert"
         minSdk = 26
         targetSdk = 35
-        versionCode = 10
-        versionName = "0.5.0"
+        versionCode = 11
+        versionName = "0.5.1"
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"${kakaoNativeKey.get()}\"")
         buildConfigField("String", "DATA_GO_KR_SERVICE_KEY", "\"${dataGoServiceKey.get()}\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
