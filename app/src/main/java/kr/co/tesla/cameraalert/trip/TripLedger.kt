@@ -18,11 +18,23 @@ object TripLedger {
     private const val RECORDS = "records"
     private const val ACTIVE = "active"
 
-    fun begin(context: Context, vin: String, odometerKm: Double, batteryPercent: Int, model: String?, now: Long) {
+    data class BatteryCapacity(val kwh: Double, val source: String)
+
+    fun begin(
+        context: Context,
+        vin: String,
+        odometerKm: Double,
+        batteryPercent: Int,
+        model: String?,
+        trim: String?,
+        now: Long
+    ) {
         if (active(context) != null) return
+        val capacity = batteryCapacity(vin, model, trim)
         val value = JSONObject().apply {
             put("vin", vin); put("startedAt", now); put("odometerKm", odometerKm)
-            put("batteryPercent", batteryPercent); put("model", model ?: "")
+            put("batteryPercent", batteryPercent); put("model", model ?: ""); put("trim", trim ?: "")
+            put("batteryCapacityKwh", capacity.kwh); put("batteryCapacitySource", capacity.source)
         }
         prefs(context).edit().putString(ACTIVE, value.toString()).apply()
     }
@@ -33,7 +45,9 @@ object TripLedger {
         prefs(context).edit().remove(ACTIVE).apply()
         if (distance < 0.1) return null
         val batteryUsed = (start.getInt("batteryPercent") - batteryPercent).takeIf { it >= 0 }
-        val kwh = batteryUsed?.let { percent -> round(capacityKwh(start.optString("model")) * percent) / 100.0 }
+        val capacity = start.optDouble("batteryCapacityKwh", Double.NaN).takeIf { it.isFinite() && it > 0 }
+            ?: batteryCapacity(start.getString("vin"), start.optString("model"), start.optString("trim")).kwh
+        val kwh = batteryUsed?.let { percent -> round(capacity * percent) / 100.0 }
         val kmPerKwh = kwh?.takeIf { it > 0 }?.let { round(distance / it * 10) / 10.0 }
         val record = TripRecord(start.getString("vin"), start.getLong("startedAt"), now, distance, batteryUsed, kwh, kmPerKwh,
             start.getInt("batteryPercent"), batteryPercent)
@@ -60,6 +74,21 @@ object TripLedger {
                 if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
                 batteryStartPercent(value), batteryEndPercent(value))
         }.sortedByDescending { it.startedAt }
+    }
+
+    /** Rebuilds calculated energy and efficiency while retaining the original trip facts. */
+    fun recalculateEfficiency(context: Context, vin: String, capacityKwh: Double): Int {
+        require(capacityKwh > 0)
+        var changed = 0
+        val recalculated = allRecords(context).map { record ->
+            if (record.vin != vin || record.batteryUsedPercent == null) return@map record
+            val kwh = round(capacityKwh * record.batteryUsedPercent) / 100.0
+            val efficiency = kwh.takeIf { it > 0 }?.let { round(record.distanceKm / it * 10) / 10.0 }
+            changed++
+            record.copy(estimatedKwh = kwh, kmPerKwh = efficiency)
+        }
+        if (changed > 0) saveAll(context, recalculated)
+        return changed
     }
 
     fun toCsv(context: Context): String = buildString {
@@ -123,9 +152,26 @@ object TripLedger {
         fields.add(value.toString()); return fields
     }
 
-    private fun capacityKwh(model: String): Double = when (model.lowercase()) {
-        "models", "modelx" -> 95.0
-        else -> 75.0 // Model 3/Y and unknown trims: estimate, not BMS-measured energy.
+    /**
+     * Tesla's vehicle data provides model and trim but not usable pack kWh. Keep the
+     * selected value with the trip, so later software updates never change old records.
+     */
+    fun batteryCapacity(vin: String, model: String?, trim: String?): BatteryCapacity {
+        val car = model.orEmpty().lowercase()
+        val badge = trim.orEmpty().lowercase()
+        val isAwd = badge.contains("awd") || badge.endsWith("d") || badge.contains("dual")
+        return when {
+            car.startsWith("modely") && badge.isBlank() -> BatteryCapacity(75.0, "Model Y 트림 확인 대기")
+            car.startsWith("modely") && isAwd ->
+                BatteryCapacity(78.4, "Model Y Long Range/AWD")
+            car.startsWith("modely") && !isAwd && vin.getOrNull(9)?.uppercaseChar() == 'S' ->
+                BatteryCapacity(60.0, "2025 Model Y Juniper RWD")
+            car.startsWith("modely") && !isAwd -> BatteryCapacity(60.0, "Model Y RWD")
+            car.startsWith("model3") && isAwd -> BatteryCapacity(75.0, "Model 3 Long Range/AWD")
+            car.startsWith("model3") -> BatteryCapacity(60.0, "Model 3 RWD")
+            car.startsWith("models") || car.startsWith("modelx") -> BatteryCapacity(95.0, "Model S/X")
+            else -> BatteryCapacity(75.0, "기본값")
+        }
     }
     /** Reads pre-update records that stored the inverse Wh/km efficiency. */
     private fun efficiencyKmPerKwh(value: JSONObject): Double? = when {

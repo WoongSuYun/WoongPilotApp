@@ -360,7 +360,40 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
         val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val vinValue = prefs.getString("vin", "").orEmpty()
         val active = TripLedger.active(context)
+        val vehicle = TeslaVehicleCache.load(context, vinValue)?.data
+        val modelName = when (vehicle?.model?.lowercase()) {
+            "modely" -> "Model Y"
+            "model3" -> "Model 3"
+            "models" -> "Model S"
+            "modelx" -> "Model X"
+            else -> vehicle?.model.orEmpty()
+        }
+        val vehicleLabel = listOf(modelName, vehicle?.trim.orEmpty()).filter { it.isNotBlank() }.joinToString(" · ")
+        val capacity = vehicle?.let { TripLedger.batteryCapacity(vinValue, it.model, it.trim) }
         card(tripPage).apply {
+            val vehicleHeader = row()
+            vehicleHeader.addView(text("내 차량", 13f, accent, true), LinearLayout.LayoutParams(0, -2, 1f))
+            vehicleHeader.addView(action("전비 다시 계산", false) {
+                val selectedCapacity = capacity
+                if (selectedCapacity == null || vinValue.isBlank()) {
+                    Toast.makeText(context, "Tesla 차량 정보를 먼저 동기화해 주세요.", Toast.LENGTH_SHORT).show()
+                    return@action
+                }
+                AlertDialog.Builder(context)
+                    .setTitle("기존 전비 다시 계산")
+                    .setMessage("${selectedCapacity.source} ${"%.1f".format(selectedCapacity.kwh)}kWh 기준으로 이 차량의 기존 운행 기록을 다시 계산합니다. 거리와 시간은 변경되지 않습니다.")
+                    .setNegativeButton("취소", null)
+                    .setPositiveButton("다시 계산") { _, _ ->
+                        val count = TripLedger.recalculateEfficiency(context, vinValue, selectedCapacity.kwh)
+                        Toast.makeText(context, "${count}건의 운행 전비를 다시 계산했습니다.", Toast.LENGTH_LONG).show()
+                        renderTripLog()
+                    }.show()
+            }, LinearLayout.LayoutParams(-2, -2))
+            addView(vehicleHeader)
+            addView(text(vehicleLabel.ifBlank { "차량 정보 동기화 대기" }, 18f, ink, true))
+            addView(text(capacity?.let { "전비 계산 기준 · ${it.source} · ${"%.1f".format(it.kwh)} kWh" }
+                ?: "Tesla 차량 정보를 받아오면 전비 기준 용량을 자동 설정합니다.", 12f, muted))
+            space(14)
             addView(text(if (active == null) "다음 운행을 기다리고 있어요" else "● 운행 기록 중", 20f, ink, true))
             addView(text(if (active == null) "D/R 진입과 P 주차를 자동 감지합니다." else "시작 ${tripTime(active.optLong("startedAt"))} · P 주차 후 자동 저장", 13f, muted))
             space(12)

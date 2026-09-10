@@ -53,9 +53,10 @@ class TripMonitorService : Service() {
         val active = TripLedger.active(this)
         when {
             driving && active == null -> {
-                TripLedger.begin(this, vin, odo, battery, data.model, System.currentTimeMillis())
+                TripLedger.begin(this, vin, odo, battery, data.model, data.trim, System.currentTimeMillis())
                 parkedAt = null
-                update("운행 자동 기록 중 · ${"%.1f".format(odo)} km")
+                val capacity = TripLedger.batteryCapacity(vin, data.model, data.trim)
+                update("운행 자동 기록 중 · ${"%.1f".format(odo)} km · ${capacity.source} ${capacity.kwh}kWh 기준")
             }
             driving -> {
                 parkedAt = null

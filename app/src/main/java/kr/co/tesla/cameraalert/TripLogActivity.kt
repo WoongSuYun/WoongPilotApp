@@ -101,7 +101,7 @@ class TripLogActivity : AppCompatActivity() {
             addView(label("${records.size}회 운행 · 배터리 총 ${batteryUsed}% 사용", 13f, Color.LTGRAY))
         }
         body.addView(label("운행 기록", 18f).apply { typeface = Typeface.DEFAULT_BOLD })
-        body.addView(label("전비는 배터리 % 변화와 차종별 추정 용량으로 계산합니다.", 12f, Color.LTGRAY))
+        body.addView(label("전비는 차량 모델·트림으로 자동 선택한 사용 가능 배터리 용량과 배터리 % 변화로 계산합니다.", 12f, Color.LTGRAY))
         if (records.isEmpty()) body.addView(label("아직 저장된 운행이 없습니다. 자동 기록을 켠 뒤 주행해 보세요.", 15f, Color.LTGRAY))
         records.forEach { trip ->
             card().apply {
