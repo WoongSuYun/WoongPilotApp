@@ -54,4 +54,13 @@ class HybridAlertsTest {
             match = event(CameraSource.KAKAO, "camera").match.copy(distanceMeters = 232.0))
         assertEquals(300, gate.alertDistanceMeters(returned, 190.0, 2_000, 700))
     }
+
+    @Test fun `new camera revealed immediately after a turn uses actual hundred metre distance`() {
+        val gate = CameraAlertGate()
+        gate.observeHeading(0.0, 1_000)
+        gate.observeHeading(90.0, 2_000)
+        val closeCamera = event(CameraSource.KAKAO, "new-camera").copy(
+            match = event(CameraSource.KAKAO, "new-camera").match.copy(distanceMeters = 132.0))
+        assertEquals(200, gate.alertDistanceMeters(closeCamera, 90.0, 3_000, 700))
+    }
 }

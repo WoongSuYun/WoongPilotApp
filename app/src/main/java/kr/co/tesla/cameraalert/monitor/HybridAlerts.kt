@@ -22,6 +22,20 @@ object HybridAlerts {
 class CameraAlertGate {
     private data class Entry(val event: SourcedMatch, val heading: Double, val at: Long)
     private val recent = mutableListOf<Entry>()
+    private var lastHeading: Double? = null
+    private var lastHeadingAt: Long = 0L
+    private var recentTurnAt: Long = Long.MIN_VALUE
+
+    /** Records GPS heading even when no camera is currently selected. */
+    fun observeHeading(heading: Double, now: Long) {
+        val previous = lastHeading
+        if (previous != null && now - lastHeadingAt in 0..HEADING_SAMPLE_MAX_AGE_MS &&
+            headingDifference(heading, previous) > SHARP_TURN_DEGREES) {
+            recentTurnAt = now
+        }
+        lastHeading = heading
+        lastHeadingAt = now
+    }
     /**
      * Returns the distance that should be announced, or null for an already-announced camera.
      *
@@ -51,10 +65,12 @@ class CameraAlertGate {
             safety.distanceMeters > speedCameraFirstAlertDistance) return null
 
         val reversedDirection = related.isNotEmpty()
+        val newlyRevealedAfterTurn = safety.type == SafetyAlertType.SPEED_CAMERA && related.isEmpty() &&
+            now - recentTurnAt in 0..RECENT_TURN_WINDOW_MS
         recent.add(Entry(event, heading, now))
         return when {
             safety.type != SafetyAlertType.SPEED_CAMERA -> safety.distanceMeters.toInt().coerceAtLeast(1)
-            reversedDirection -> roundUpToHundred(safety.distanceMeters)
+            reversedDirection || newlyRevealedAfterTurn -> roundUpToHundred(safety.distanceMeters)
             else -> speedCameraFirstAlertDistance
         }
     }
@@ -63,8 +79,17 @@ class CameraAlertGate {
         alertDistanceMeters(event, heading, now) != null
 
     private fun sameDirection(first: Double, second: Double): Boolean =
-        kotlin.math.abs((first - second + 540) % 360 - 180) <= 45
+        headingDifference(first, second) <= 45
+
+    private fun headingDifference(first: Double, second: Double): Double =
+        kotlin.math.abs((first - second + 540) % 360 - 180)
 
     private fun roundUpToHundred(distanceMeters: Double): Int =
         (kotlin.math.ceil(distanceMeters.coerceAtLeast(1.0) / 100.0) * 100).toInt()
+
+    private companion object {
+        const val HEADING_SAMPLE_MAX_AGE_MS = 10_000L
+        const val RECENT_TURN_WINDOW_MS = 15_000L
+        const val SHARP_TURN_DEGREES = 60.0
+    }
 }

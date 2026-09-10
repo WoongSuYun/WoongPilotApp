@@ -230,6 +230,8 @@ class CameraMonitorService : Service(), LocationListener {
         lastFix = SystemClock.elapsedRealtime()
         val position = VehiclePosition(fix.latitude, fix.longitude, fix.bearing.toDouble(),
             fix.speed * 3.6, fix.time)
+        val now = SystemClock.elapsedRealtime()
+        alerts.observeHeading(position.heading, now)
         updateActiveSpeedCamera(position)
         val healthy = kakao?.healthy(isOnline()) == true
         val enabledTypes = SafetyAlertSettings.enabledTypes(this)
@@ -249,7 +251,6 @@ class CameraMonitorService : Service(), LocationListener {
             if (match.type == SafetyAlertType.SPEED_CAMERA) append("${match.limitKph ?: "--"}km/h · ")
             append("${match.type.label} · ${match.roadName} · ${event.source.label}")
         }
-        val now = SystemClock.elapsedRealtime()
         val overspeed = match.type == SafetyAlertType.SPEED_CAMERA && match.limitKph != null &&
             position.speedKph > match.limitKph && SafetyAlertSettings.isOverspeedToneEnabled(this)
         if (overspeed) {
