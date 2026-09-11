@@ -1,0 +1,25 @@
+<?xml version="1.0" encoding="utf-8"?>
+<shortcuts xmlns:android="http://schemas.android.com/apk/res/android">
+    <shortcut
+        android:shortcutId="start_monitoring"
+        android:enabled="true"
+        android:icon="@drawable/cream"
+        android:shortcutShortLabel="@string/shortcut_start_monitoring"
+        android:shortcutLongLabel="@string/shortcut_start_monitoring">
+        <intent
+            android:action="kr.co.tesla.cameraalert.action.START_MONITORING"
+            android:targetPackage="kr.co.tesla.cameraalert"
+            android:targetClass="kr.co.tesla.cameraalert.AutomationActionActivity" />
+    </shortcut>
+    <shortcut
+        android:shortcutId="stop_monitoring"
+        android:enabled="true"
+        android:icon="@drawable/cream"
+        android:shortcutShortLabel="@string/shortcut_stop_monitoring"
+        android:shortcutLongLabel="@string/shortcut_stop_monitoring">
+        <intent
+            android:action="kr.co.tesla.cameraalert.action.STOP_MONITORING"
+            android:targetPackage="kr.co.tesla.cameraalert"
+            android:targetClass="kr.co.tesla.cameraalert.AutomationActionActivity" />
+    </shortcut>
+</shortcuts>

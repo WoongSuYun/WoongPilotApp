@@ -1,0 +1,4 @@
+<resources>
+    <string name="shortcut_start_monitoring">웅파일럿 감시 시작</string>
+    <string name="shortcut_stop_monitoring">웅파일럿 감시 종료</string>
+</resources>

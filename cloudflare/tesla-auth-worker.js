@@ -9,6 +9,9 @@ const REDIRECT_URI = `${ORIGIN}/auth/tesla/callback`;
 const AUTH_URL = "https://auth.tesla.com/oauth2/v3/authorize";
 const TOKEN_URL = "https://fleet-auth.prd.vn.cloud.tesla.com/oauth2/v3/token";
 const FLEET_API = "https://fleet-api.prd.na.vn.cloud.tesla.com";
+// `vehicle_data` is large and is the endpoint most likely to exhaust a Fleet quota.
+// Cache only successful reads, per OAuth session + VIN, for a short but meaningful interval.
+const VEHICLE_DATA_CACHE_SECONDS = 5 * 60;
 const SCOPES = "openid offline_access user_data vehicle_device_data vehicle_cmds";
 
 function randomId() {
@@ -50,14 +53,16 @@ async function sessionFor(env, id) {
 }
 
 async function fleet(env, session, path, options = {}) {
-  const requestOptions = { ...options, headers: { ...(options.headers || {}), authorization: `Bearer ${session.access_token}` } };
-  let response = await fetch(`${FLEET_API}${path}`, requestOptions);
+  const request = () => fetch(`${FLEET_API}${path}`, {
+    ...options, headers: { ...(options.headers || {}), authorization: `Bearer ${session.access_token}` },
+  });
+  let response = await request();
   if (response.status === 401 && session.refresh_token) {
     const refreshed = await exchange(env, { grant_type: "refresh_token", refresh_token: session.refresh_token });
     session.access_token = refreshed.access_token;
     session.refresh_token = refreshed.refresh_token || session.refresh_token;
     await env.TESLA_SESSIONS.put(`session:${session.id}`, JSON.stringify(session), { expirationTtl: 60 * 60 * 24 * 89 });
-    response = await fetch(`${FLEET_API}${path}`, requestOptions);
+    response = await request();
   }
   return response;
 }
@@ -127,8 +132,23 @@ export default {
       const session = await sessionFor(env, id);
       if (!session) return json({ error: "session_not_found" }, 401);
       try {
+        const cacheKey = `vehicle_data:${id}:${vin}`;
+        const cached = await env.TESLA_SESSIONS.get(cacheKey);
+        if (cached) {
+          return new Response(cached, { status: 200, headers: {
+            "content-type": "application/json; charset=utf-8", "cache-control": "private, max-age=0",
+            "x-woongpilot-cache": "HIT",
+          }});
+        }
         const response = await fleet(env, session, `/api/1/vehicles/${vin}/vehicle_data`);
-        return new Response(response.body, { status: response.status, headers: { "content-type": "application/json; charset=utf-8", "cache-control": "no-store" } });
+        const body = await response.text();
+        if (response.ok) {
+          await env.TESLA_SESSIONS.put(cacheKey, body, { expirationTtl: VEHICLE_DATA_CACHE_SECONDS });
+        }
+        return new Response(body, { status: response.status, headers: {
+          "content-type": "application/json; charset=utf-8", "cache-control": "no-store",
+          "x-woongpilot-cache": "MISS",
+        }});
       } catch (error) { return json({ error: "fleet_request_failed", detail: error.message }, 502); }
     }
 

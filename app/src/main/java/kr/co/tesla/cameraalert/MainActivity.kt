@@ -90,10 +90,9 @@ class MainActivity : AppCompatActivity() {
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         val pair = pendingPair ?: return@registerForActivityResult
         pendingPair = null
-        val registered = prefs.getString("pairedVin", "") == vin.text.toString()
-        if (requiredPermissions(includeBluetooth = pair || registered).all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })
-            launchMonitor(pair, !pair && prefs.getBoolean("manual_monitor_enabled", false))
-        else status.text = "차량 연결과 감시에는 정확한 위치 및 근처 기기 권한이 필요합니다."
+        if (requiredPermissions(includeBluetooth = pair).all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })
+            launchMonitor(pair)
+        else status.text = "키 등록에는 위치 및 근처 기기 권한이 필요합니다."
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
     private val exportTrips = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
@@ -136,7 +135,7 @@ class MainActivity : AppCompatActivity() {
             onPair = { begin(true) },
             onStart = { begin(false) },
             onStop = {
-                stopService(Intent(this, CameraMonitorService::class.java))
+                CameraMonitorService.stop(this)
                 prefs.edit().putString("status", "감시를 중지했습니다.").apply()
             }, onCheckKakao = { checkKakao() }, onTeslaLogin = { TeslaAuth.start(this) },
             onTeslaLogout = { confirmTeslaLogout() }, onWakeTesla = { wakeTeslaAndRefresh() },
@@ -236,13 +235,6 @@ class MainActivity : AppCompatActivity() {
         panel.addView(voicePicker, LinearLayout.LayoutParams(-1, -2))
         panel.addView(speedLabel)
         panel.addView(speed, LinearLayout.LayoutParams(-1, -2))
-        val autoMonitor = Switch(this).apply {
-            text = "앱을 열면 감시 자동 시작"
-            isChecked = prefs.getBoolean("auto_monitor_enabled", true)
-            textSize = 16f
-            setPadding(0, padding, 0, 0)
-        }
-        panel.addView(autoMonitor)
 
         fun selectedVoice() = voicePicker.selectedItem as? AlertSpeaker.VoiceOption
             ?: AlertSpeaker.VoiceOption(null, "기본 한국어 음성")
@@ -254,7 +246,6 @@ class MainActivity : AppCompatActivity() {
             .setNeutralButton("미리 듣기", null)
             .setPositiveButton("저장") { _, _ ->
                 alertSpeaker.save(enabled.isChecked, selectedVoice().name, selectedRate())
-                prefs.edit().putBoolean("auto_monitor_enabled", autoMonitor.isChecked).apply()
             }.show()
         dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
             if (!alertSpeaker.preview(selectedVoice().name, selectedRate()))
@@ -745,18 +736,10 @@ class MainActivity : AppCompatActivity() {
             text = "단속 시 플로팅 제한속도 아이콘"
             isChecked = prefs.getBoolean("floating_alert_enabled", false)
         }
-        val manual = Switch(this).apply {
-            text = "차량 연결 없이 수동 감시 시작"
-            isChecked = prefs.getBoolean("manual_monitor_enabled", false)
-        }
         panel.addView(floating)
         panel.addView(TextView(this).apply {
             text = "다른 앱 위에 표시 권한이 있어야 하며, 단속 경고 중에만 제한속도와 거리를 띄웁니다."
             setPadding(0, 0, 0, padding / 2)
-        })
-        panel.addView(manual)
-        panel.addView(TextView(this).apply {
-            text = "켜면 감시 시작을 직접 눌렀을 때 차량 BLE 연결 없이 GPS·카카오 안전 안내를 사용합니다."
         })
         val cameraDataStatus = TextView(this).apply {
             text = publicCameraDataStatus()
@@ -772,8 +755,7 @@ class MainActivity : AppCompatActivity() {
             .setView(panel)
             .setNegativeButton("취소", null)
             .setPositiveButton("저장") { _, _ ->
-                prefs.edit().putBoolean("floating_alert_enabled", floating.isChecked)
-                    .putBoolean("manual_monitor_enabled", manual.isChecked).apply()
+                prefs.edit().putBoolean("floating_alert_enabled", floating.isChecked).apply()
                 if (!floating.isChecked) kr.co.tesla.cameraalert.monitor.CameraAlertOverlay.hide()
                 if (floating.isChecked && !Settings.canDrawOverlays(this)) {
                     status.text = "플로팅 아이콘을 쓰려면 ‘다른 앱 위에 표시’ 권한을 허용해 주세요."
@@ -1072,7 +1054,7 @@ class MainActivity : AppCompatActivity() {
             .setNegativeButton("취소", null)
             .setPositiveButton("삭제") { _, _ ->
                 runCatching { VehicleKey.remove(value) }
-                prefs.edit().remove("pairedVin").putBoolean("auto_monitor_enabled", false).apply()
+                prefs.edit().remove("pairedVin").apply()
                 dashboard.updatePairing(false)
                 dashboard.updatePairingProgress(false, "")
                 status.text = "앱 키 등록을 삭제했습니다. 카드키로 새로 등록하세요."
@@ -1081,50 +1063,31 @@ class MainActivity : AppCompatActivity() {
     private fun begin(pair: Boolean) {
         val value = vin.text.toString().trim().uppercase(Locale.ROOT)
         if (!TeslaProtocol.validVin(value)) { status.text = "VIN 17자리를 확인하세요 (I, O, Q 제외)."; return }
-        val alreadyPaired = prefs.getString("pairedVin", "") == value
-        if (!pair && !alreadyPaired && !prefs.getBoolean("manual_monitor_enabled", false)) {
-            status.text = "감시 모드 설정에서 ‘차량 연결 없이 수동 감시 시작’을 켜 주세요."
-            return
-        }
         if (pair) dashboard.updatePairingProgress(false, "등록 시작")
         vin.setText(value)
         prefs.edit().putString("vin", value).apply()
-        prefs.edit().putBoolean("auto_monitor_enabled", true).apply()
-        val permissions = requiredPermissions(includeBluetooth = pair || alreadyPaired)
+        val permissions = requiredPermissions(includeBluetooth = pair)
         if (permissions.any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
             pendingPair = pair; this.permissions.launch(permissions); return
         }
-        launchMonitor(pair, !pair && prefs.getBoolean("manual_monitor_enabled", false))
+        launchMonitor(pair)
     }
-    private fun launchMonitor(pair: Boolean, allowManual: Boolean = false) {
-        // Service serializes replacement requests and closes the previous GATT first.
+    private fun launchMonitor(pair: Boolean) {
+        // Pairing uses BLE once; ordinary monitoring is explicitly started by this caller.
         ContextCompat.startForegroundService(this, Intent(this, CameraMonitorService::class.java)
-            .putExtra("pair", pair).putExtra("allowManual", allowManual))
+            .putExtra("pair", pair))
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
-    private fun startAutoMonitorIfReady() {
-        if (!prefs.getBoolean("auto_monitor_enabled", true) || CameraMonitorService.isRunning()) return
-        val savedVin = prefs.getString("vin", "").orEmpty()
-        if (!TeslaProtocol.validVin(savedVin) || prefs.getString("pairedVin", "") != savedVin) return
-        if (requiredPermissions(includeBluetooth = true).any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
-            status.text = "자동 감시를 위해 위치와 주변 기기 권한을 허용해 주세요."
-            return
-        }
-        status.text = "등록된 차량을 찾는 중 · 연결되면 감시를 자동 시작합니다."
-        launchMonitor(false)
-    }
     override fun onStart() {
         super.onStart(); prefs.registerOnSharedPreferenceChangeListener(listener)
-        if (TeslaVehicleCache.load(this, prefs.getString("vin", "").orEmpty()) == null) startTeslaRefresh()
         startTripRecorderIfEnabled()
         status.text = prefs.getString("status", "차량 키 등록부터 시작하세요.")
         dashboard.kakaoStatus.text = prefs.getString("kakao_status", "카카오 연결 확인 중…")
-        startAutoMonitorIfReady()
     }
     private fun startTripRecorderIfEnabled() {
-        if ((!prefs.getBoolean("trip_auto_enabled", false) && !prefs.getBoolean("auto_monitor_enabled", true)) ||
+        if (!prefs.getBoolean("trip_auto_enabled", false) ||
             !TeslaAuth.isSignedIn(this) ||
             prefs.getString("vin", "").orEmpty().length != 17) return
         ContextCompat.startForegroundService(this, Intent(this, kr.co.tesla.cameraalert.trip.TripMonitorService::class.java))

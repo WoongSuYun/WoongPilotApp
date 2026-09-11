@@ -7,7 +7,6 @@ import androidx.core.app.NotificationCompat
 import kotlinx.coroutines.*
 import kr.co.tesla.cameraalert.MainActivity
 import kr.co.tesla.cameraalert.TeslaAuth
-import kr.co.tesla.cameraalert.monitor.CameraMonitorService
 
 /** Foreground recorder: detects D/R -> P transitions without using the phone's GPS distance. */
 class TripMonitorService : Service() {
@@ -37,18 +36,18 @@ class TripMonitorService : Service() {
                 update("Tesla 로그인과 차량 선택이 필요합니다"); stopSelf(); return@launch
             }
             while (isActive) {
-                val monitoringEnabled = getSharedPreferences("settings", MODE_PRIVATE)
-                    .getBoolean("auto_monitor_enabled", true)
                 val tripLoggingEnabled = getSharedPreferences("settings", MODE_PRIVATE)
                     .getBoolean("trip_auto_enabled", false)
-                if (!monitoringEnabled && !tripLoggingEnabled) {
+                if (!tripLoggingEnabled) {
                     stopSelf()
                     return@launch
                 }
                 runCatching { TeslaAuth.vehicleData(this@TripMonitorService, vin) }
                     .onSuccess { process(vin, it) }
                     .onFailure { update("차량 상태 대기 중 · 다음 확인 예정") }
-                delay(if (monitoringEnabled) 15_000 else 60_000)
+                // Fleet API polling is only for the optional trip ledger.  Five minutes is
+                // sufficient for trip boundaries and avoids continuously waking/polling Tesla.
+                delay(5 * 60_000)
             }
         }
         return START_STICKY
@@ -56,16 +55,8 @@ class TripMonitorService : Service() {
 
     private fun process(vin: String, data: TeslaAuth.VehicleData) {
         val prefs = getSharedPreferences("settings", MODE_PRIVATE)
-        // Camera monitoring uses this latest Fleet state to distinguish a brief BLE drop while
-        // driving from a disconnect after the vehicle has been parked.
-        prefs.edit().putString("vehicle_gear", data.gear.orEmpty()).apply()
         val driving = data.gear in setOf("D", "R")
-        if (driving && prefs.getBoolean("auto_monitor_enabled", true)) {
-            // Fleet D/R state can start monitoring even when BLE is delayed or unavailable.
-            CameraMonitorService.startForDriving(this)
-        }
-        // Vehicle-state observation is also used for camera monitoring. Trip logging remains
-        // opt-in, so do not create or update a trip while its switch is off.
+        // Trip logging is opt-in and is independent of camera monitoring.
         if (!prefs.getBoolean("trip_auto_enabled", false)) return
         val odo = data.odometerKm
         val battery = data.usableBatteryPercent ?: data.batteryPercent

@@ -21,6 +21,7 @@
         android:label="웅파일럿"
         android:theme="@style/Theme.CameraAlert">
         <activity android:name=".MainActivity" android:exported="true">
+            <meta-data android:name="android.app.shortcuts" android:resource="@xml/shortcuts" />
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
@@ -34,6 +35,11 @@
         </activity>
         <activity android:name=".TripLogActivity" android:exported="false" />
         <activity android:name=".CameraListActivity" android:exported="false" />
+        <activity
+            android:name=".AutomationActionActivity"
+            android:exported="true"
+            android:excludeFromRecents="true"
+            android:noHistory="true" />
         <service android:name=".monitor.CameraMonitorService" android:exported="false" android:foregroundServiceType="location|connectedDevice" />
         <service android:name=".trip.TripMonitorService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>

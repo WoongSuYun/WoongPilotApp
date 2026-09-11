@@ -2,7 +2,6 @@
 
 import android.annotation.SuppressLint
 import android.app.*
-import android.Manifest
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.location.*
@@ -13,7 +12,6 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kr.co.tesla.cameraalert.MainActivity
 import kr.co.tesla.cameraalert.ble.TeslaBleClient
-import kr.co.tesla.cameraalert.ble.TeslaProtocol
 import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.kakao.KakaoSafetyMonitor
 import kr.co.tesla.cameraalert.model.*
@@ -30,11 +28,6 @@ class CameraMonitorService : Service(), LocationListener {
     private var gpsWatchdog: Job? = null
     private var client: TeslaBleClient? = null
     private var cameras = emptyList<SpeedCamera>()
-    private var vehicleConnected = false
-    // Tesla BLE can be briefly dropped while the car is awake.  Once this run has verified the
-    // vehicle, GPS safety monitoring must survive those reconnects.
-    private var vehicleVerifiedForMonitoring = false
-    private var keepManualGpsWhenDisconnected = false
     private var gpsActive = false
     private var lastFix = 0L
     private var lastOverspeedToneAt = 0L
@@ -91,15 +84,9 @@ class CameraMonitorService : Service(), LocationListener {
         previous?.cancel()
         val vin = prefs.getString("vin", "").orEmpty()
         val pairing = intent?.getBooleanExtra("pair", false) == true
-        val allowManual = intent?.getBooleanExtra("allowManual", false) == true
-        // A driver-started manual session may intentionally continue without a Tesla connection.
-        // A D/R-triggered session, however, must return to vehicle search after P + disconnect.
-        keepManualGpsWhenDisconnected = allowManual &&
-            intent?.getBooleanExtra("stopWhenParked", false) != true
         task = scope.launch {
             previous?.join()
             try {
-                require(TeslaProtocol.validVin(vin)) { "올바른 VIN을 입력하세요" }
                 cameras = withContext(Dispatchers.IO) {
                     runCatching { CameraRepository(this@CameraMonitorService).load() }.getOrDefault(emptyList())
                 }
@@ -108,15 +95,7 @@ class CameraMonitorService : Service(), LocationListener {
                         client = TeslaBleClient(this@CameraMonitorService)
                         client!!.run(vin, pairing, ::status) {
                             prefs.edit().putString("pairedVin", vin).apply()
-                            vehicleConnected = true
-                            vehicleVerifiedForMonitoring = true
-                            if (prefs.getBoolean("auto_monitor_enabled", true)) {
-                                status("키 등록 완료 · 카메라 감시를 자동 시작합니다")
-                                startGps()
-                            } else {
-                                status("키 등록 확인 완료 · 감시를 시작하세요")
-                                stopSelf()
-                            }
+                            status("키 등록 완료 · 감시는 시작 버튼 또는 Android 루틴에서 시작하세요")
                         }
                     } catch (e: CancellationException) { throw e }
                     catch (e: Exception) {
@@ -125,49 +104,15 @@ class CameraMonitorService : Service(), LocationListener {
                         if (prefs.getString("pairedVin", "") != vin) {
                             status("등록 실패: ${e.message}"); stopSelf(); return@launch
                         }
-                        status("키 등록 완료 · 차량 연결이 끊겼습니다 · 휴대폰 GPS 감시 계속")
-                    } finally { vehicleConnected = false; client?.close(); client = null }
+                        status("키 등록 완료 · 차량 연결이 끊겼습니다")
+                    } finally { client?.close(); client = null }
+                    stopSelf()
+                    return@launch
                 }
-                if (allowManual) startGps()
-                if (!hasBluetoothPermission()) {
-                    if (allowManual) {
-                        status("휴대폰 GPS 감시 중 · 차량 연결 없이 카카오 안전 안내 사용 가능")
-                        awaitCancellation()
-                    } else error("차량 연결을 위해 근처 기기 권한을 허용해 주세요")
-                }
-                while (isActive) {
-                    try {
-                        client = TeslaBleClient(this@CameraMonitorService)
-                        client!!.run(vin, false, ::status, onConnected = {
-                            vehicleConnected = true
-                            vehicleVerifiedForMonitoring = true
-                            // Start on Tesla BLE connection; VCSEC key verification below is
-                            // retained for pairing-state validation, not as a start prerequisite.
-                            if (prefs.getBoolean("auto_monitor_enabled", true)) {
-                                status("차량 연결됨 · 카메라 감시를 자동 시작합니다")
-                                startGps()
-                            }
-                        }) {
-                            prefs.edit().putString("pairedVin", vin).apply()
-                            vehicleConnected = true
-                            vehicleVerifiedForMonitoring = true
-                            startGps()
-                        }
-                    } catch (e: CancellationException) { throw e }
-                    catch (e: Exception) {
-                        val parked = vehicleIsParked()
-                        val keepGps = keepManualGpsWhenDisconnected || !parked
-                        status(if (keepGps && (allowManual || vehicleVerifiedForMonitoring))
-                            "차량 연결이 끊겼습니다 · 휴대폰 GPS·카카오 안내 계속 · 15초 후 재연결"
-                        else "차량 검색 중 · 연결되면 감시를 자동 시작합니다")
-                    } finally {
-                        vehicleConnected = false
-                        if (vehicleIsParked() && !keepManualGpsWhenDisconnected) stopGps()
-                        else if (!allowManual && !vehicleVerifiedForMonitoring) stopGps()
-                        client?.close(); client = null
-                    }
-                    delay(15_000)
-                }
+                // Monitoring is deliberately caller-controlled.  A Bluetooth receiver or other
+                // Android routine starts/stops this service; it never scans or restarts itself.
+                startGps()
+                awaitCancellation()
             } catch (e: CancellationException) { throw e }
             catch (e: Exception) { status(e.message ?: "감시 시작 실패"); stopSelf() }
         }
@@ -188,10 +133,9 @@ class CameraMonitorService : Service(), LocationListener {
                 }
             }
         }
-        status(if (vehicleConnected) "차량 연결됨 · GPS 위치 대기 중" else "휴대폰 GPS 감시 중 · 차량 연결 없이 안내 가능")
+        status("휴대폰 GPS 감시 중 · Bluetooth 종료 루틴에서 감시를 중지할 수 있습니다")
     }
     private fun stopGps() {
-        vehicleConnected = false
         gpsActive = false
         monitoringActive = false
         gpsWatchdog?.cancel(); gpsWatchdog = null
@@ -386,10 +330,6 @@ class CameraMonitorService : Service(), LocationListener {
         prefs.edit().putString("status", text).apply()
         getSystemService(NotificationManager::class.java).notify(1001, notification(text))
     }
-    private fun hasBluetoothPermission(): Boolean = Build.VERSION.SDK_INT < 31 ||
-        (ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_SCAN) == PackageManager.PERMISSION_GRANTED &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.BLUETOOTH_CONNECT) == PackageManager.PERMISSION_GRANTED)
-    private fun vehicleIsParked(): Boolean = prefs.getString("vehicle_gear", "") == "P"
     private fun notification(text: String): Notification = NotificationCompat.Builder(this, CHANNEL)
         .setSmallIcon(android.R.drawable.ic_dialog_info).setContentTitle("Tesla 카메라 알림")
         .setContentText(text).setStyle(NotificationCompat.BigTextStyle().bigText(text))
@@ -422,14 +362,14 @@ class CameraMonitorService : Service(), LocationListener {
         fun isRunning(): Boolean = running
         fun isMonitoringActive(): Boolean = monitoringActive
 
-        /** D/R reported by Tesla Fleet is a second, independent monitor-start signal. */
-        fun startForDriving(context: android.content.Context) {
-            // A foreground service can already be alive merely scanning for the vehicle. That
-            // does not mean GPS camera monitoring has started, so D/R must replace that scan.
-            if (isMonitoringActive()) return
-            ContextCompat.startForegroundService(context, Intent(context, CameraMonitorService::class.java)
-                .putExtra("allowManual", true)
-                .putExtra("stopWhenParked", true))
+        /** Call from the Android Bluetooth-connected routine. */
+        fun start(context: android.content.Context) {
+            if (!isRunning()) ContextCompat.startForegroundService(context, Intent(context, CameraMonitorService::class.java))
+        }
+
+        /** Call from the Android Bluetooth-disconnected routine. */
+        fun stop(context: android.content.Context) {
+            context.stopService(Intent(context, CameraMonitorService::class.java))
         }
     }
 }
