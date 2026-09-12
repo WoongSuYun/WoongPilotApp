@@ -31,6 +31,8 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
     private val onConfigureSheets: () -> Unit, private val onOpenSheets: () -> Unit,
     private val onAppendSampleTrip: () -> Unit
 ) : ScrollView(context) {
+    // Tesla BLE card-key support remains implemented but is not shown in the current UI.
+    private val showVehicleKeySetup = false
     private val ink = Color.rgb(240, 244, 248)
     private val muted = Color.rgb(149, 164, 180)
     private val accent = Color.rgb(114, 235, 198)
@@ -196,7 +198,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
         }, LinearLayout.LayoutParams(0, -2, 1f))
         top.addView(action("?", false) {
             AlertDialog.Builder(context).setTitle("처음 사용하는 방법")
-                .setMessage("1. 차 안에서 VIN을 입력하고 키 등록을 요청하세요. 실물 카드키를 차량 콘솔에 대고 차량 화면에서 승인합니다.\n\n2. 감시 시작을 누르세요. 공공 카메라 데이터는 앱이 자동으로 갱신합니다.\n\n3. 위치·속도는 휴대폰 GPS를 사용하며 차량 연결이 끊기면 안내를 멈춥니다.\n\n앱 강제 종료나 재부팅 후에는 감시를 다시 시작하세요. 키 삭제는 차량의 잠금 설정에서 할 수 있습니다.")
+                .setMessage("1. 감시 시작을 누르거나 삼성 모드 및 루틴에서 ‘웅파일럿 감시 시작’을 실행하세요.\n\n2. 위치·속도는 휴대폰 GPS를 사용합니다. Bluetooth 연결 해제 조건에는 ‘웅파일럿 감시 종료’를 설정할 수 있습니다.\n\n3. 공공 카메라 데이터는 앱에서 업데이트할 수 있습니다.\n\n앱 강제 종료나 재부팅 후에는 감시를 다시 시작하세요.")
                 .setPositiveButton("확인", null).show()
         }.apply { contentDescription = "앱 사용 방법" }, LinearLayout.LayoutParams(dp(48), dp(48)))
         top.addView(action("✎", false) { showHeaderMessageSettings() }.apply {
@@ -302,8 +304,9 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
             addView(action("공공데이터 카메라 목록", false, onCameraList), LinearLayout.LayoutParams(-1, -2))
         }
         vehiclePage.space(5)
-        vehiclePage.addView(text("차량 키 준비", 19f, ink, true)); vehiclePage.space(12)
-        card(vehiclePage).apply {
+        val vehicleKeyHeading = text("차량 키 준비", 19f, ink, true)
+        vehiclePage.addView(vehicleKeyHeading); vehiclePage.space(12)
+        val vehicleKeyCard = card(vehiclePage).apply {
             heading(this, "01", "차량 키 연결", "처음 한 번, 카드키로 승인")
             space(16)
             keyBadge.textSize = 12f; keyBadge.setPadding(dp(10), dp(6), dp(10), dp(6))
@@ -334,6 +337,10 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
             }, LinearLayout.LayoutParams(-1, -2))
             space(8)
             addView(action("앱 키 등록 삭제 · 다시 등록", false, onClearPairing), LinearLayout.LayoutParams(-1, -2))
+        }
+        if (!showVehicleKeySetup) {
+            vehicleKeyHeading.visibility = View.GONE
+            vehicleKeyCard.visibility = View.GONE
         }
         card(guidePage).apply {
             heading(this, "02", "카카오 안전 안내", "목적지 없이 · 과속카메라 안내")

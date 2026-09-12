@@ -1083,7 +1083,7 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart(); prefs.registerOnSharedPreferenceChangeListener(listener)
         startTripRecorderIfEnabled()
-        status.text = prefs.getString("status", "차량 키 등록부터 시작하세요.")
+        status.text = prefs.getString("status", "감시 시작 또는 외부 자동화를 기다리는 중입니다.")
         dashboard.kakaoStatus.text = prefs.getString("kakao_status", "카카오 연결 확인 중…")
     }
     private fun startTripRecorderIfEnabled() {

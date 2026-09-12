@@ -133,7 +133,7 @@ class CameraMonitorService : Service(), LocationListener {
                 }
             }
         }
-        status("휴대폰 GPS 감시 중 · Bluetooth 종료 루틴에서 감시를 중지할 수 있습니다")
+        status("휴대폰 GPS 감시 중 · 위치 신호 대기 중")
     }
     private fun stopGps() {
         gpsActive = false
