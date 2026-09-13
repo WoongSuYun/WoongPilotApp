@@ -353,10 +353,10 @@ class CameraMonitorService : Service(), LocationListener {
         private const val PASS_CONFIRMATION_RADIUS_METERS = 60.0
         private const val PASSING_AWAY_DELTA_METERS = 15.0
         // A small per-fix delta is intentional: at low-speed turns GPS positions are close
-        // together, while the 40 m total-distance requirement filters normal GPS drift.
+        // together, while the 20 m total-distance requirement filters normal GPS drift.
         private const val MOVING_AWAY_SAMPLE_DELTA_METERS = 2.0
         private const val TURN_AWAY_CONFIRMATION_SAMPLES = 2
-        private const val TURN_AWAY_DISTANCE_METERS = 40.0
+        private const val TURN_AWAY_DISTANCE_METERS = 20.0
         @Volatile private var running = false
         @Volatile private var monitoringActive = false
         fun isRunning(): Boolean = running
