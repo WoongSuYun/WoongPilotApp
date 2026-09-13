@@ -1,9 +1,15 @@
 *.iml
 .gradle/
+.gradle*/
+.kotlin/
 .idea/
 local.properties
 build/
 **/build/
+.externalNativeBuild/
+.cxx/
+captures/
+*.hprof
 *.jks
 *.keystore
 !signing/woongpilot-debug.keystore
@@ -14,7 +20,9 @@ build/
 # Local Android/Gradle tooling and build-session caches
 .android-sdk/
 .android-user/
+.android*/
 .gradle-user/
+.gradle-local/
 .build-apk*.out
 .build-apk*.err
 commandlinetools-*.zip

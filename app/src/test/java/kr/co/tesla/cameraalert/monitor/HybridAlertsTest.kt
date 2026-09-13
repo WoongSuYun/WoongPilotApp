@@ -52,7 +52,7 @@ class HybridAlertsTest {
         assertEquals(700, gate.alertDistanceMeters(event(CameraSource.KAKAO, "camera"), 10.0, 1_000, 700))
         val returned = event(CameraSource.KAKAO, "camera").copy(
             match = event(CameraSource.KAKAO, "camera").match.copy(distanceMeters = 232.0))
-        assertEquals(300, gate.alertDistanceMeters(returned, 190.0, 2_000, 700))
+        assertEquals(200, gate.alertDistanceMeters(returned, 190.0, 2_000, 700))
     }
 
     @Test fun `new camera revealed immediately after a turn uses actual hundred metre distance`() {
@@ -61,15 +61,39 @@ class HybridAlertsTest {
         gate.observeHeading(90.0, 2_000)
         val closeCamera = event(CameraSource.KAKAO, "new-camera").copy(
             match = event(CameraSource.KAKAO, "new-camera").match.copy(distanceMeters = 132.0))
-        assertEquals(200, gate.alertDistanceMeters(closeCamera, 90.0, 3_000, 700))
+        assertEquals(100, gate.alertDistanceMeters(closeCamera, 90.0, 3_000, 700))
     }
 
-    @Test fun `children zone warning rounds its GPS distance up to a hundred metres`() {
+    @Test fun `turn warning rounds to the nearest hundred metres`() {
+        val gate = CameraAlertGate()
+        gate.observeHeading(0.0, 1_000)
+        gate.observeHeading(90.0, 2_000)
+        val camera230m = event(CameraSource.KAKAO, "camera-230m").copy(
+            match = event(CameraSource.KAKAO, "camera-230m").match.copy(distanceMeters = 230.0))
+        assertEquals(200, gate.alertDistanceMeters(camera230m, 90.0, 3_000, 500))
+
+        val camera251m = event(CameraSource.KAKAO, "camera-251m", latitude = 37.503).copy(
+            match = event(CameraSource.KAKAO, "camera-251m", latitude = 37.503).match.copy(distanceMeters = 251.0))
+        assertEquals(300, gate.alertDistanceMeters(camera251m, 90.0, 4_000, 500))
+    }
+
+    @Test fun `gradual turn is detected across multiple GPS fixes`() {
+        val gate = CameraAlertGate()
+        gate.observeHeading(0.0, 1_000)
+        gate.observeHeading(25.0, 2_000)
+        gate.observeHeading(50.0, 3_000)
+        gate.observeHeading(90.0, 4_000)
+        val closeCamera = event(CameraSource.KAKAO, "gradual-turn-camera").copy(
+            match = event(CameraSource.KAKAO, "gradual-turn-camera").match.copy(distanceMeters = 132.0))
+        assertEquals(100, gate.alertDistanceMeters(closeCamera, 90.0, 5_000, 500))
+    }
+
+    @Test fun `children zone warning rounds its GPS distance to the nearest hundred metres`() {
         val gate = CameraAlertGate()
         val childrenZone = event(CameraSource.KAKAO, "children-zone").copy(
             match = event(CameraSource.KAKAO, "children-zone").match.copy(
-                type = SafetyAlertType.CHILDREN_ZONE, distanceMeters = 123.0, limitKph = null))
-        assertEquals(200, gate.alertDistanceMeters(childrenZone, 10.0, 1_000, 700))
+                type = SafetyAlertType.CHILDREN_ZONE, distanceMeters = 99.0, limitKph = null))
+        assertEquals(100, gate.alertDistanceMeters(childrenZone, 10.0, 1_000, 700))
     }
 
     @Test fun `children zone waits until it is within one hundred metres`() {

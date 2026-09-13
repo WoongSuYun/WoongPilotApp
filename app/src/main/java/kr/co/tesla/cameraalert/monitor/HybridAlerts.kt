@@ -24,14 +24,20 @@ class CameraAlertGate {
     private val recent = mutableListOf<Entry>()
     private var lastHeading: Double? = null
     private var lastHeadingAt: Long = 0L
+    private var turnReferenceHeading: Double? = null
     private var recentTurnAt: Long = Long.MIN_VALUE
 
     /** Records GPS heading even when no camera is currently selected. */
     fun observeHeading(heading: Double, now: Long) {
         val previous = lastHeading
-        if (previous != null && now - lastHeadingAt in 0..HEADING_SAMPLE_MAX_AGE_MS &&
-            headingDifference(heading, previous) > SHARP_TURN_DEGREES) {
+        val reference = turnReferenceHeading
+        if (previous == null || now - lastHeadingAt !in 0..HEADING_SAMPLE_MAX_AGE_MS) {
+            turnReferenceHeading = heading
+        } else if (reference != null && headingDifference(heading, reference) > SHARP_TURN_DEGREES) {
+            // GPS bearing can change gradually over several fixes while turning. Compare with
+            // the heading at the beginning of the sample window, not only the previous fix.
             recentTurnAt = now
+            turnReferenceHeading = heading
         }
         lastHeading = heading
         lastHeadingAt = now
@@ -75,8 +81,8 @@ class CameraAlertGate {
         return when {
             // Safety-zone guidance should sound like navigation guidance too.  Never speak
             // arbitrary GPS values such as "123 m ahead" for a children zone or sharp turn.
-            safety.type != SafetyAlertType.SPEED_CAMERA -> roundUpToHundred(safety.distanceMeters)
-            reversedDirection || newlyRevealedAfterTurn -> roundUpToHundred(safety.distanceMeters)
+            safety.type != SafetyAlertType.SPEED_CAMERA -> roundToNearestHundred(safety.distanceMeters)
+            reversedDirection || newlyRevealedAfterTurn -> roundToNearestHundred(safety.distanceMeters)
             else -> speedCameraFirstAlertDistance
         }
     }
@@ -90,8 +96,8 @@ class CameraAlertGate {
     private fun headingDifference(first: Double, second: Double): Double =
         kotlin.math.abs((first - second + 540) % 360 - 180)
 
-    private fun roundUpToHundred(distanceMeters: Double): Int =
-        (kotlin.math.ceil(distanceMeters.coerceAtLeast(1.0) / 100.0) * 100).toInt()
+    private fun roundToNearestHundred(distanceMeters: Double): Int =
+        (kotlin.math.round(distanceMeters.coerceAtLeast(1.0) / 100.0) * 100).toInt().coerceAtLeast(100)
 
     private companion object {
         const val HEADING_SAMPLE_MAX_AGE_MS = 10_000L
