@@ -40,6 +40,34 @@ class HybridAlertsTest {
         assertEquals(500, gate.alertDistanceMeters(event(CameraSource.KAKAO, "camera"), 10.0, 1_000, 500))
     }
 
+    @Test fun `a camera is not announced again after a long signal wait`() {
+        val gate = CameraAlertGate()
+        assertEquals(500, gate.alertDistanceMeters(event(CameraSource.KAKAO, "camera"), 10.0, 1_000, 500))
+        val resumed = event(CameraSource.KAKAO, "camera").copy(
+            match = event(CameraSource.KAKAO, "camera").match.copy(distanceMeters = 120.0))
+
+        assertNull(gate.alertDistanceMeters(resumed, 10.0, 181_001, 500))
+    }
+
+    @Test fun `a passed camera can be announced on a later approach`() {
+        val gate = CameraAlertGate()
+        val camera = event(CameraSource.KAKAO, "camera")
+        assertEquals(500, gate.alertDistanceMeters(camera, 10.0, 1_000, 500))
+
+        gate.forgetSpeedCamera(camera.match.id, camera.match.latitude, camera.match.longitude)
+        assertEquals(500, gate.alertDistanceMeters(camera, 10.0, 181_001, 500))
+    }
+
+    @Test fun `a camera re-approached after a broad curve uses its current distance`() {
+        val gate = CameraAlertGate()
+        val camera = event(CameraSource.KAKAO, "camera")
+        assertEquals(500, gate.alertDistanceMeters(camera, 10.0, 1_000, 500))
+
+        gate.reapproachSpeedCamera(camera.match.id, camera.match.latitude, camera.match.longitude, 20_000)
+        val returned = camera.copy(match = camera.match.copy(distanceMeters = 132.0))
+        assertEquals(100, gate.alertDistanceMeters(returned, 10.0, 20_001, 500))
+    }
+
     @Test fun `camera outside first warning distance waits until it reaches the milestone`() {
         val gate = CameraAlertGate()
         val far = event(CameraSource.KAKAO, "camera").copy(

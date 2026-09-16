@@ -39,6 +39,7 @@ class CameraMonitorService : Service(), LocationListener {
     private var activeCameraId: String? = null
     private var dismissedCameraId: String? = null
     private var activeSpeedCamera: ActiveSpeedCamera? = null
+    private var departedSpeedCamera: DepartedSpeedCamera? = null
     private var kakao: KakaoSafetyMonitor? = null
     private var kakaoTask: Job? = null
 
@@ -46,10 +47,18 @@ class CameraMonitorService : Service(), LocationListener {
         val id: String,
         val latitude: Double,
         val longitude: Double,
-        val limitKph: Int,
+        val limitKph: Int?,
         var closestDistanceMeters: Double = Double.POSITIVE_INFINITY,
         var previousDistanceMeters: Double = Double.POSITIVE_INFINITY,
         var movingAwaySamples: Int = 0
+    )
+
+    /** A camera that briefly became farther away; a broad curve can legitimately do this. */
+    private data class DepartedSpeedCamera(
+        val id: String,
+        val latitude: Double,
+        val longitude: Double,
+        var farthestDistanceMeters: Double
     )
 
     override fun onCreate() {
@@ -210,6 +219,26 @@ class CameraMonitorService : Service(), LocationListener {
             status("${position.speedKph.toInt()}km/h · $source"); return
         }
         val match = event.match
+        val departed = departedSpeedCamera
+        if (match.type == SafetyAlertType.SPEED_CAMERA && departed != null &&
+            (departed.id == match.id || CameraDetector.distanceMeters(
+                match.latitude, match.longitude, departed.latitude, departed.longitude) < 60)) {
+            val distance = CameraDetector.distanceMeters(
+                position.latitude, position.longitude, departed.latitude, departed.longitude)
+            if (distance > departed.farthestDistanceMeters) {
+                departed.farthestDistanceMeters = distance
+                overspeedCameraId = null
+                status("${position.speedKph.toInt()}km/h · $source · 경로 복귀 확인 중")
+                return
+            }
+            if (distance > departed.farthestDistanceMeters - REAPPROACH_DISTANCE_METERS) {
+                overspeedCameraId = null
+                status("${position.speedKph.toInt()}km/h · $source · 경로 복귀 확인 중")
+                return
+            }
+            departedSpeedCamera = null
+            alerts.reapproachSpeedCamera(match.id, match.latitude, match.longitude, now)
+        }
         // The event feed may continue returning the old camera after a turn.  A dismissed or
         // route-departed camera must not keep producing the repeated overspeed tone.
         if (match.type == SafetyAlertType.SPEED_CAMERA && dismissedCameraId == match.id) {
@@ -252,13 +281,13 @@ class CameraMonitorService : Service(), LocationListener {
             }
             // The floating card is intentionally reserved for enforcement cameras: it needs a
             // speed limit to be useful and should not cover navigation for other safety notices.
-            if (match.type == SafetyAlertType.SPEED_CAMERA && match.limitKph != null) {
+            if (match.type == SafetyAlertType.SPEED_CAMERA) {
                 activeSpeedCamera = ActiveSpeedCamera(
                     match.id, match.latitude, match.longitude, match.limitKph,
                     closestDistanceMeters = match.distanceMeters,
                     previousDistanceMeters = match.distanceMeters
                 )
-                if (prefs.getBoolean("floating_alert_enabled", false))
+                if (match.limitKph != null && prefs.getBoolean("floating_alert_enabled", false))
                     CameraAlertOverlay.show(this, match.distanceMeters.toInt(), match.limitKph, keepVisible = true)
             }
             scope.launch {
@@ -306,17 +335,24 @@ class CameraMonitorService : Service(), LocationListener {
         if (passedCamera || turnedAwayBeforeCamera) {
             activeSpeedCamera = null
             if (activeCameraId == camera.id) activeCameraId = null
-            dismissedCameraId = camera.id
             CameraAlertOverlay.hide()
             CameraAlertNotification.cancel(this)
             if (passedCamera) {
+                alerts.forgetSpeedCamera(camera.id, camera.latitude, camera.longitude)
+                departedSpeedCamera = null
+                dismissedCameraId = camera.id
                 playCameraPassedTone()
                 status("과속카메라를 통과했습니다")
             } else {
+                // A broad R-curve can increase the straight-line GPS distance before it
+                // points back at the same camera.  Suppress it only while it keeps getting
+                // farther away; re-arm when the distance has meaningfully decreased.
+                departedSpeedCamera = DepartedSpeedCamera(
+                    camera.id, camera.latitude, camera.longitude, distance)
                 status("경로가 변경되어 과속카메라 안내를 종료했습니다")
             }
         }
-        if (activeSpeedCamera != null && dismissedCameraId != camera.id &&
+        if (activeSpeedCamera != null && dismissedCameraId != camera.id && camera.limitKph != null &&
             prefs.getBoolean("floating_alert_enabled", false)) {
             CameraAlertOverlay.show(this, distance.toInt(), camera.limitKph, keepVisible = true)
         }
@@ -357,6 +393,7 @@ class CameraMonitorService : Service(), LocationListener {
         private const val MOVING_AWAY_SAMPLE_DELTA_METERS = 2.0
         private const val TURN_AWAY_CONFIRMATION_SAMPLES = 2
         private const val TURN_AWAY_DISTANCE_METERS = 20.0
+        private const val REAPPROACH_DISTANCE_METERS = 20.0
         @Volatile private var running = false
         @Volatile private var monitoringActive = false
         fun isRunning(): Boolean = running

@@ -56,7 +56,13 @@ class CameraAlertGate {
         now: Long,
         speedCameraFirstAlertDistance: Int = 700
     ): Int? {
-        recent.removeAll { now - it.at !in 0..120_000 }
+        // A speed camera remains relevant while the car waits at a signal.  Expiring its
+        // history by time alone made a stop longer than two minutes look like a newly found
+        // camera and replay the configured first-distance announcement (for example 500 m).
+        // It is removed explicitly after the vehicle passes it or leaves its route.
+        recent.removeAll {
+            it.event.match.type != SafetyAlertType.SPEED_CAMERA && now - it.at !in 0..120_000
+        }
         val safety = event.match
         // These two everyday notices are intentionally close-range only.  Until the car is
         // within 100 m, leave no history entry so the first in-range fix can announce "100 m".
@@ -89,6 +95,23 @@ class CameraAlertGate {
 
     fun shouldAlert(event: SourcedMatch, heading: Double, now: Long): Boolean =
         alertDistanceMeters(event, heading, now) != null
+
+    /** Releases the deduplication record once this camera is no longer ahead of the vehicle. */
+    fun forgetSpeedCamera(id: String, latitude: Double, longitude: Double) {
+        recent.removeAll {
+            val other = it.event.match
+            other.type == SafetyAlertType.SPEED_CAMERA &&
+                (other.id == id || CameraDetector.distanceMeters(latitude, longitude, other.latitude, other.longitude) < 60)
+        }
+    }
+
+    /** Re-enables a camera after a curved route temporarily moved away from it. */
+    fun reapproachSpeedCamera(id: String, latitude: Double, longitude: Double, now: Long) {
+        forgetSpeedCamera(id, latitude, longitude)
+        // This is a continuation of an already announced approach, not a new 500/700 m
+        // discovery.  Use the current rounded distance when it is announced again.
+        recentTurnAt = now
+    }
 
     private fun sameDirection(first: Double, second: Double): Boolean =
         headingDifference(first, second) <= 45
