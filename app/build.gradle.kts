@@ -1,4 +1,7 @@
 import java.util.Properties
+import java.time.ZoneId
+import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
 
 plugins {
     id("com.android.application")
@@ -13,6 +16,8 @@ val kakaoNativeKey = providers.gradleProperty("KAKAO_NATIVE_APP_KEY")
     .orElse(localConfig.getProperty("KAKAO_NATIVE_APP_KEY", ""))
 val dataGoServiceKey = providers.gradleProperty("DATA_GO_KR_SERVICE_KEY")
     .orElse(localConfig.getProperty("DATA_GO_KR_SERVICE_KEY", ""))
+val buildDate = ZonedDateTime.now(ZoneId.of("Asia/Seoul"))
+    .format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm"))
 
 android {
     namespace = "kr.co.tesla.cameraalert"
@@ -22,10 +27,11 @@ android {
         applicationId = "kr.co.tesla.cameraalert"
         minSdk = 26
         targetSdk = 35
-        versionCode = 11
-        versionName = "0.5.1"
+        versionCode = 1001
+        versionName = "0.5.10"
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"${kakaoNativeKey.get()}\"")
         buildConfigField("String", "DATA_GO_KR_SERVICE_KEY", "\"${dataGoServiceKey.get()}\"")
+        buildConfigField("String", "BUILD_DATE", "\"$buildDate\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
     signingConfigs {

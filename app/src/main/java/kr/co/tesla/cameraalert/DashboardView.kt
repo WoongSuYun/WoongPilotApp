@@ -181,6 +181,11 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
                 headerMessage.text = value
             }.show()
     }
+    private fun buildInfoView() = text("앱 버전 ${BuildConfig.VERSION_NAME} · 빌드 ${BuildConfig.BUILD_DATE}", 11f, muted).apply {
+        gravity = Gravity.CENTER
+        setPadding(0, dp(2), 0, dp(10))
+    }
+
     init {
         setBackgroundColor(Color.rgb(12, 18, 27)); isFillViewport = true
         isVerticalScrollBarEnabled = false
@@ -361,6 +366,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
         guidePage.addView(text("차량 연결 없이도 휴대폰 GPS·카카오 안전 안내를 사용할 수 있어요.\n화면을 꺼도 실행 중인 감시는 계속됩니다.", 12f, muted).apply {
             gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
         })
+        guidePage.addView(buildInfoView())
     }
     private fun renderTripLog() {
         tripPage.removeAllViews()
