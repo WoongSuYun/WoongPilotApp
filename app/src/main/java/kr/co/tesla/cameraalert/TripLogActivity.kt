@@ -1,6 +1,5 @@
 package kr.co.tesla.cameraalert
 
-import android.content.Intent
 import android.graphics.Color
 import android.graphics.Typeface
 import android.graphics.drawable.GradientDrawable
@@ -8,9 +7,7 @@ import android.os.Bundle
 import android.view.Gravity
 import android.widget.*
 import androidx.appcompat.app.AppCompatActivity
-import androidx.core.content.ContextCompat
 import kr.co.tesla.cameraalert.trip.TripLedger
-import kr.co.tesla.cameraalert.trip.TripMonitorService
 import java.text.SimpleDateFormat
 import java.util.*
 
@@ -67,16 +64,16 @@ class TripLogActivity : AppCompatActivity() {
             addView(label(if (active == null) "다음 운행을 기다리고 있어요" else "운행을 자동 기록하고 있어요", 18f, Color.WHITE).apply {
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             })
-            addView(label(if (active == null) "자동 기록을 켜면 D/R 진입과 P 주차를 감지합니다." else "시작 ${format(active.optLong("startedAt"))} · P 주차 후 자동 저장", 13f, Color.LTGRAY))
+            addView(label(if (active == null) "감시 모드 GPS 이동 뒤 Tesla 상태를 확인하고, 5분 정지 후 P면 저장합니다." else "시작 ${format(active.optLong("startedAt"))} · 5분 정지 후 P 확인 시 자동 저장", 13f, Color.LTGRAY))
             val controls = LinearLayout(this@TripLogActivity).apply { orientation = LinearLayout.HORIZONTAL }
             controls.addView(action("자동 기록 시작", true) {
-            prefs.edit().putBoolean("trip_auto_enabled", true).apply()
-            ContextCompat.startForegroundService(this@TripLogActivity, Intent(this@TripLogActivity, TripMonitorService::class.java))
+            prefs.edit().putBoolean("trip_auto_enabled", true)
+                .putString("trip_status", "자동 기록 모드 켜짐 · 감시 모드 GPS 이동 감지 대기").apply()
             Toast.makeText(this@TripLogActivity, "차계부 자동 기록을 시작했습니다.", Toast.LENGTH_SHORT).show()
             }, LinearLayout.LayoutParams(0, -2, 1f))
             controls.addView(action("중지") {
-            prefs.edit().putBoolean("trip_auto_enabled", false).apply()
-            stopService(Intent(this@TripLogActivity, TripMonitorService::class.java))
+            prefs.edit().putBoolean("trip_auto_enabled", false)
+                .putString("trip_status", "자동 기록 모드 꺼짐").apply()
             Toast.makeText(this@TripLogActivity, "자동 기록을 중지했습니다.", Toast.LENGTH_SHORT).show()
             }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
             addView(controls)

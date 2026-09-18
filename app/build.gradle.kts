@@ -27,8 +27,8 @@ android {
         applicationId = "kr.co.tesla.cameraalert"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1001
-        versionName = "0.5.10"
+        versionCode = 1008
+        versionName = "0.5.17"
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"${kakaoNativeKey.get()}\"")
         buildConfigField("String", "DATA_GO_KR_SERVICE_KEY", "\"${dataGoServiceKey.get()}\"")
         buildConfigField("String", "BUILD_DATE", "\"$buildDate\"")

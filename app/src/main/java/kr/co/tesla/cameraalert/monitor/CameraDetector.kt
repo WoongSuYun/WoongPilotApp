@@ -6,6 +6,15 @@ import kr.co.tesla.cameraalert.model.VehiclePosition
 import kotlin.math.*
 
 object CameraDetector {
+    /** True only when a point is genuinely in front of the current GPS heading. */
+    internal fun isAhead(
+        vehicle: VehiclePosition,
+        latitude: Double,
+        longitude: Double,
+        maxAngleDegrees: Double = 35.0
+    ): Boolean = angularDifference(vehicle.heading, bearingDegrees(
+        vehicle.latitude, vehicle.longitude, latitude, longitude)) <= maxAngleDegrees
+
     fun nearestAhead(
         vehicle: VehiclePosition,
         cameras: List<SpeedCamera>,

@@ -81,10 +81,11 @@ object TeslaAuth {
         } finally { connection.disconnect() }
     }
 
-    suspend fun vehicleData(context: Context, vin: String): VehicleData = withContext(Dispatchers.IO) {
+    suspend fun vehicleData(context: Context, vin: String, requireFresh: Boolean = false): VehicleData = withContext(Dispatchers.IO) {
         val sessionId = context.getSharedPreferences("secure_session", Context.MODE_PRIVATE)
             .getString(SESSION_KEY, null) ?: error("Tesla sign-in is required")
-        val connection = (URL("$ORIGIN/api/session/$sessionId/vehicle/$vin/data").openConnection() as HttpURLConnection).apply {
+        val freshness = if (requireFresh) "?fresh=1" else ""
+        val connection = (URL("$ORIGIN/api/session/$sessionId/vehicle/$vin/data$freshness").openConnection() as HttpURLConnection).apply {
             requestMethod = "GET"
             connectTimeout = 15_000
             readTimeout = 20_000
@@ -134,7 +135,9 @@ object TeslaAuth {
                 model = config.text("car_type"), trim = config.text("trim_badging"), color = config.text("exterior_color"),
                 locked = vehicle.bool("locked"), softwareStatus = software.text("status"),
                 softwareVersion = vehicle.text("car_version"), vehicleState = response.text("state"),
-                gear = drive.text("shift_state")?.uppercase(), speedKph = drive.milesToKm("speed"),
+                gear = drive.text("shift_state")?.uppercase()
+                    ?: drive?.takeIf { it.has("shift_state") && it.isNull("shift_state") }?.let { "P" },
+                speedKph = drive.milesToKm("speed"),
                 sentryMode = vehicle.bool("sentry_mode"), doorsOpen = vehicle.anyPanelOpen(),
                 outsideTempC = climate.number("outside_temp"), insideTempC = climate.number("inside_temp")
             )

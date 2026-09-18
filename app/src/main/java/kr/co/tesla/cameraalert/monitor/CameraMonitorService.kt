@@ -11,13 +11,15 @@ import android.os.*
 import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kr.co.tesla.cameraalert.MainActivity
-import kr.co.tesla.cameraalert.ble.TeslaBleClient
+import kr.co.tesla.cameraalert.TeslaAuth
 import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.kakao.KakaoSafetyMonitor
 import kr.co.tesla.cameraalert.model.*
 import kr.co.tesla.cameraalert.voice.AlertSpeaker
 import kr.co.tesla.cameraalert.voice.AppSoundPlayer
 import kr.co.tesla.cameraalert.voice.GeminiTts
+import kr.co.tesla.cameraalert.trip.GoogleSheetsSync
+import kr.co.tesla.cameraalert.trip.TripLedger
 import kotlinx.coroutines.*
 
 class CameraMonitorService : Service(), LocationListener {
@@ -26,7 +28,6 @@ class CameraMonitorService : Service(), LocationListener {
     private val location by lazy { getSystemService(LocationManager::class.java) }
     private var task: Job? = null
     private var gpsWatchdog: Job? = null
-    private var client: TeslaBleClient? = null
     private var cameras = emptyList<SpeedCamera>()
     private var gpsActive = false
     private var lastFix = 0L
@@ -38,10 +39,19 @@ class CameraMonitorService : Service(), LocationListener {
     private val alerts = CameraAlertGate()
     private var activeCameraId: String? = null
     private var dismissedCameraId: String? = null
+    private var dismissedSpeedCamera: DismissedSpeedCamera? = null
     private var activeSpeedCamera: ActiveSpeedCamera? = null
     private var departedSpeedCamera: DepartedSpeedCamera? = null
     private var kakao: KakaoSafetyMonitor? = null
     private var kakaoTask: Job? = null
+    private var tripMovingSince: Long? = null
+    private var tripStationarySince: Long? = null
+    private var tripRequestActive = false
+    private var tripLastStartCheckAt = 0L
+    private var tripRequestToken = 0L
+    private var tripAutoEnabledLast = false
+    private var tripReadyLast = false
+    private var tripObservedVin = ""
 
     private data class ActiveSpeedCamera(
         val id: String,
@@ -59,6 +69,13 @@ class CameraMonitorService : Service(), LocationListener {
         val latitude: Double,
         val longitude: Double,
         var farthestDistanceMeters: Double
+    )
+
+    /** A passed/dismissed camera may be armed again only on a later, real approach. */
+    private data class DismissedSpeedCamera(
+        val id: String,
+        val latitude: Double,
+        val longitude: Double
     )
 
     override fun onCreate() {
@@ -79,6 +96,9 @@ class CameraMonitorService : Service(), LocationListener {
         }
         if (intent?.action == CameraAlertNotification.DISMISS_ACTION) {
             dismissedCameraId = activeCameraId
+            activeSpeedCamera?.takeIf { it.id == activeCameraId }?.let {
+                dismissedSpeedCamera = DismissedSpeedCamera(it.id, it.latitude, it.longitude)
+            }
             CameraAlertOverlay.hide()
             CameraAlertNotification.cancel(this)
             if (task == null) {
@@ -91,35 +111,14 @@ class CameraMonitorService : Service(), LocationListener {
         startForeground(1001, notification("차량 연결 준비 중…"))
         val previous = task
         previous?.cancel()
-        val vin = prefs.getString("vin", "").orEmpty()
-        val pairing = intent?.getBooleanExtra("pair", false) == true
         task = scope.launch {
             previous?.join()
             try {
                 cameras = withContext(Dispatchers.IO) {
                     runCatching { CameraRepository(this@CameraMonitorService).load() }.getOrDefault(emptyList())
                 }
-                if (pairing) {
-                    try {
-                        client = TeslaBleClient(this@CameraMonitorService)
-                        client!!.run(vin, pairing, ::status) {
-                            prefs.edit().putString("pairedVin", vin).apply()
-                            status("키 등록 완료 · 감시는 시작 버튼 또는 Android 루틴에서 시작하세요")
-                        }
-                    } catch (e: CancellationException) { throw e }
-                    catch (e: Exception) {
-                        // Once the vehicle has confirmed the key, a later BLE disconnect
-                        // must not be presented as a failed registration.
-                        if (prefs.getString("pairedVin", "") != vin) {
-                            status("등록 실패: ${e.message}"); stopSelf(); return@launch
-                        }
-                        status("키 등록 완료 · 차량 연결이 끊겼습니다")
-                    } finally { client?.close(); client = null }
-                    stopSelf()
-                    return@launch
-                }
-                // Monitoring is deliberately caller-controlled.  A Bluetooth receiver or other
-                // Android routine starts/stops this service; it never scans or restarts itself.
+                // Monitoring is deliberately caller-controlled. It only uses phone GPS and
+                // never scans, connects to, or registers a Tesla vehicle.
                 startGps()
                 awaitCancellation()
             } catch (e: CancellationException) { throw e }
@@ -194,6 +193,7 @@ class CameraMonitorService : Service(), LocationListener {
         if (!fix.hasAccuracy() || fix.accuracy > 40f) {
             status("휴대폰 GPS 감시 중 · 위치 정확도 확인 중"); return
         }
+        observeTripGps(fix)
         if (!fix.hasSpeed() || fix.speed < 2f) {
             status("차량 정차 중 · 카메라 감시 준비됨"); return
         }
@@ -241,10 +241,31 @@ class CameraMonitorService : Service(), LocationListener {
         }
         // The event feed may continue returning the old camera after a turn.  A dismissed or
         // route-departed camera must not keep producing the repeated overspeed tone.
-        if (match.type == SafetyAlertType.SPEED_CAMERA && dismissedCameraId == match.id) {
-            overspeedCameraId = null
-            status("${position.speedKph.toInt()}km/h · $source · 다음 카메라 안내 대기")
-            return
+        if (match.type == SafetyAlertType.SPEED_CAMERA) {
+            val dismissed = dismissedSpeedCamera
+            val sameDismissedCamera = dismissed != null && (dismissed.id == match.id ||
+                CameraDetector.distanceMeters(match.latitude, match.longitude, dismissed.latitude, dismissed.longitude) < 60)
+            if (sameDismissedCamera) {
+                val distance = CameraDetector.distanceMeters(position.latitude, position.longitude,
+                    dismissed.latitude, dismissed.longitude)
+                val returningFromFront = distance >= DISMISSED_CAMERA_REARM_DISTANCE_METERS &&
+                    CameraDetector.isAhead(position, dismissed.latitude, dismissed.longitude)
+                if (returningFromFront) {
+                    dismissedCameraId = null
+                    dismissedSpeedCamera = null
+                    alerts.reapproachSpeedCamera(dismissed.id, dismissed.latitude, dismissed.longitude, now)
+                } else {
+                    overspeedCameraId = null
+                    status("${position.speedKph.toInt()}km/h · $source · 다음 카메라 안내 대기")
+                    return
+                }
+            } else if (dismissedCameraId == match.id) {
+                // Keep the old behavior for a non-speed-camera manual dismissal, which has no
+                // coordinate to safely distinguish an old feed from a future approach.
+                overspeedCameraId = null
+                status("${position.speedKph.toInt()}km/h · $source · 다음 카메라 안내 대기")
+                return
+            }
         }
         val detail = buildString {
             if (match.type != SafetyAlertType.BUS_LANE) append("${match.distanceMeters.toInt()}m 앞 · ")
@@ -269,6 +290,7 @@ class CameraMonitorService : Service(), LocationListener {
         if (announcedDistance != null) {
             activeCameraId = match.id
             dismissedCameraId = null
+            dismissedSpeedCamera = null
             val announcedDetail = detail.replaceFirst("${match.distanceMeters.toInt()}m", "${announcedDistance}m")
             status(announcedDetail)
             // Speed-camera/overspeed guidance is delivered by voice, the ongoing monitor
@@ -305,6 +327,144 @@ class CameraMonitorService : Service(), LocationListener {
             status(detail)
         }
     }
+    /**
+     * Uses the already-running monitor GPS as a low-cost trip trigger. Tesla is contacted only
+     * after sustained movement and after a sustained stop; it is never polled while moving.
+     */
+    private fun observeTripGps(fix: Location) {
+        val automaticEnabled = prefs.getBoolean("trip_auto_enabled", false)
+        if (!automaticEnabled) {
+            if (tripAutoEnabledLast) invalidateTripRequest()
+            tripAutoEnabledLast = false
+            tripReadyLast = false
+            tripMovingSince = null; tripStationarySince = null
+            return
+        }
+        tripAutoEnabledLast = true
+        val vin = prefs.getString("vin", "").orEmpty()
+        if (vin.length != 17 || !TeslaAuth.isSignedIn(this)) {
+            if (tripReadyLast) invalidateTripRequest()
+            tripReadyLast = false
+            tripStatus("자동 기록 대기 · Tesla 로그인과 차량 선택이 필요합니다")
+            return
+        }
+        tripReadyLast = true
+        if (tripObservedVin != vin) {
+            if (tripObservedVin.isNotEmpty()) invalidateTripRequest()
+            tripObservedVin = vin
+            tripMovingSince = null
+            tripStationarySince = null
+        }
+        val now = SystemClock.elapsedRealtime()
+        val speedKph = if (fix.hasSpeed()) fix.speed * 3.6 else 0.0
+        val activeTrip = TripLedger.active(this)
+        if (activeTrip != null && activeTrip.optString("vin") != vin) {
+            tripMovingSince = null
+            tripStationarySince = null
+            tripStatus("자동 기록 보류 · 진행 중 기록의 차량과 선택한 차량이 다릅니다")
+            return
+        }
+        if (activeTrip == null) {
+            tripStationarySince = null
+            if (speedKph >= TRIP_START_SPEED_KPH) {
+                val movingSince = tripMovingSince ?: now.also { tripMovingSince = it }
+                if (now - movingSince >= TRIP_START_CONFIRM_MS &&
+                    now - tripLastStartCheckAt >= TRIP_RECHECK_MS && !tripRequestActive) {
+                    tripLastStartCheckAt = now
+                    requestTripSnapshot(vin, checkingStop = false)
+                }
+            } else {
+                if (tripMovingSince != null) invalidateTripRequest()
+                tripMovingSince = null
+            }
+            return
+        }
+        tripMovingSince = null
+        if (speedKph > TRIP_STOP_SPEED_KPH) {
+            if (tripStationarySince != null) invalidateTripRequest()
+            tripStationarySince = null
+            return
+        }
+        val stationarySince = tripStationarySince ?: now.also { tripStationarySince = it }
+        if (now - stationarySince >= TRIP_STOP_CONFIRM_MS && !tripRequestActive) {
+            // Reset before the request so a D/R response (or a transient failure) waits another
+            // five stationary minutes rather than requesting again on every GPS sample.
+            tripStationarySince = now
+            requestTripSnapshot(vin, checkingStop = true)
+        }
+    }
+
+    private fun requestTripSnapshot(vin: String, checkingStop: Boolean) {
+        val requestToken = ++tripRequestToken
+        tripRequestActive = true
+        tripStatus(if (checkingStop) "5분 정지 감지 · 차량 P 상태 확인 중" else "이동 감지 · 차량 주행 상태 확인 중")
+        scope.launch {
+            val result = withContext(Dispatchers.IO) {
+                runCatching { TeslaAuth.vehicleData(this@CameraMonitorService, vin, requireFresh = true) }
+            }
+            tripRequestActive = false
+            if (requestToken != tripRequestToken || !prefs.getBoolean("trip_auto_enabled", false) ||
+                prefs.getString("vin", "").orEmpty() != vin || !TeslaAuth.isSignedIn(this@CameraMonitorService)) return@launch
+            val activeTrip = TripLedger.active(this@CameraMonitorService)
+            if ((checkingStop && (activeTrip == null || activeTrip.optString("vin") != vin)) ||
+                (!checkingStop && activeTrip != null)) return@launch
+            val data = result.getOrElse {
+                tripStatus("차량 상태 확인 실패 · 다음 GPS 조건에서 다시 확인합니다")
+                return@launch
+            }
+            val odometer = data.odometerKm
+            val battery = data.usableBatteryPercent ?: data.batteryPercent
+            if (odometer == null || battery == null) {
+                tripStatus("주행거리 또는 배터리 데이터 대기 중")
+                return@launch
+            }
+            val driving = data.gear in setOf("D", "R")
+            if (!checkingStop) {
+                if (driving && TripLedger.active(this@CameraMonitorService) == null) {
+                    TripLedger.begin(this@CameraMonitorService, vin, odometer, battery, data.model, data.trim,
+                        System.currentTimeMillis())
+                    tripStatus("운행 자동 기록 중 · Tesla 시작 상태 확인 완료")
+                } else {
+                    tripStatus("이동은 감지됐지만 차량이 ${data.gear ?: "P"} 상태입니다 · 다음 이동 때 다시 확인")
+                }
+                return@launch
+            }
+            if (data.gear == "P") {
+                val record = TripLedger.finish(this@CameraMonitorService, odometer, battery, System.currentTimeMillis())
+                if (record == null) {
+                    if (TripLedger.active(this@CameraMonitorService) != null) {
+                        tripStationarySince = SystemClock.elapsedRealtime()
+                        tripStatus("주차 확인 · 주행거리 갱신 대기 중 · 5분 뒤 다시 확인")
+                    } else {
+                        tripStationarySince = null
+                        tripStatus("주차 확인 · 기록할 이동 거리가 없습니다")
+                    }
+                } else {
+                    tripStationarySince = null
+                    tripStatus("운행 저장 · ${"%.1f".format(record.distanceKm)} km")
+                    scope.launch(Dispatchers.IO) {
+                        GoogleSheetsSync.enqueue(this@CameraMonitorService, record)
+                        val uploaded = GoogleSheetsSync.syncPending(this@CameraMonitorService)
+                        if (uploaded > 0) withContext(Dispatchers.Main) {
+                            tripStatus("운행 저장 · Google Sheets ${uploaded}건 기록 완료")
+                        }
+                    }
+                }
+            } else {
+                tripStatus("정차 중이나 차량이 ${data.gear ?: "알 수 없음"} 상태입니다 · 5분 뒤 다시 확인")
+            }
+        }
+    }
+
+    /** A response that was requested under an old GPS, VIN, or enabled-state is never applied. */
+    private fun invalidateTripRequest() {
+        tripRequestToken++
+    }
+
+    private fun tripStatus(text: String) {
+        if (prefs.getString("trip_status", "") != text) prefs.edit().putString("trip_status", text).apply()
+    }
+
     private fun playFallbackTone() = sounds.playFallbackWarning()
     private fun playOverspeedTone() = sounds.playOverspeed(SafetyAlertSettings.overspeedToneStyle(this))
     /**
@@ -341,6 +501,7 @@ class CameraMonitorService : Service(), LocationListener {
                 alerts.forgetSpeedCamera(camera.id, camera.latitude, camera.longitude)
                 departedSpeedCamera = null
                 dismissedCameraId = camera.id
+                dismissedSpeedCamera = DismissedSpeedCamera(camera.id, camera.latitude, camera.longitude)
                 playCameraPassedTone()
                 status("과속카메라를 통과했습니다")
             } else {
@@ -376,7 +537,7 @@ class CameraMonitorService : Service(), LocationListener {
     override fun onDestroy() {
         running = false
         monitoringActive = false
-        task?.cancel(); scope.cancel(); client?.close(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()
+        task?.cancel(); scope.cancel(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()
         CameraAlertNotification.cancel(this)
         CameraAlertOverlay.hide()
         stopForeground(STOP_FOREGROUND_REMOVE)
@@ -394,6 +555,12 @@ class CameraMonitorService : Service(), LocationListener {
         private const val TURN_AWAY_CONFIRMATION_SAMPLES = 2
         private const val TURN_AWAY_DISTANCE_METERS = 20.0
         private const val REAPPROACH_DISTANCE_METERS = 20.0
+        private const val DISMISSED_CAMERA_REARM_DISTANCE_METERS = 150.0
+        private const val TRIP_START_SPEED_KPH = 10.0
+        private const val TRIP_STOP_SPEED_KPH = 2.0
+        private const val TRIP_START_CONFIRM_MS = 30_000L
+        private const val TRIP_STOP_CONFIRM_MS = 5 * 60_000L
+        private const val TRIP_RECHECK_MS = 5 * 60_000L
         @Volatile private var running = false
         @Volatile private var monitoringActive = false
         fun isRunning(): Boolean = running

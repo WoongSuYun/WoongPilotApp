@@ -4,6 +4,7 @@ import android.Manifest
 import android.content.Intent
 import android.content.SharedPreferences
 import android.content.pm.PackageManager
+import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.net.Uri
@@ -20,8 +21,6 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
-import kr.co.tesla.cameraalert.ble.TeslaProtocol
-import kr.co.tesla.cameraalert.ble.VehicleKey
 import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.monitor.CameraMonitorService
 import kr.co.tesla.cameraalert.monitor.CameraAlertNotification
@@ -47,12 +46,10 @@ class MainActivity : AppCompatActivity() {
     }
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private lateinit var dashboard: DashboardView
-    private lateinit var vin: EditText
     private lateinit var status: TextView
     private lateinit var alertSpeaker: AlertSpeaker
     private lateinit var geminiSpeaker: GeminiTts
     private lateinit var sounds: AppSoundPlayer
-    private var pendingPair: Boolean? = null
     private var pendingGoogleSheetId: String? = null
     private val googleSheetsLogin = registerForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
         val account = runCatching {
@@ -77,22 +74,14 @@ class MainActivity : AppCompatActivity() {
         if (key == "status") runOnUiThread {
             val current = prefs.getString("status", "").orEmpty()
             status.text = current
-            dashboard.updatePairingProgress(vin.text.toString() == prefs.getString("pairedVin", ""), current)
-        }
-        if (key == "pairedVin") runOnUiThread {
-            val paired = vin.text.toString() == prefs.getString("pairedVin", "")
-            dashboard.updatePairing(paired)
-            dashboard.updatePairingProgress(paired, prefs.getString("status", "").orEmpty())
         }
         if (key == "kakao_status") runOnUiThread { dashboard.kakaoStatus.text = prefs.getString("kakao_status", "연결 확인 전") }
         if (key == "trip_status") runOnUiThread { dashboard.refreshTripLog() }
     }
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
-        val pair = pendingPair ?: return@registerForActivityResult
-        pendingPair = null
-        if (requiredPermissions(includeBluetooth = pair).all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })
-            launchMonitor(pair)
-        else status.text = "키 등록에는 위치 및 근처 기기 권한이 필요합니다."
+        if (requiredPermissions().all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })
+            startMonitoring()
+        else showLocationPermissionGuide(canOpenSettings = true)
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
     private val exportTrips = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
@@ -130,10 +119,8 @@ class MainActivity : AppCompatActivity() {
         val initialVin = prefs.getString("vin", "").orEmpty()
         val initialTeslaName = if (prefs.getString("tesla_vehicle_name_vin", "") == initialVin)
             prefs.getString("tesla_vehicle_name", "").orEmpty() else ""
-        dashboard = DashboardView(this, initialVin, initialTeslaName,
-            prefs.getString("pairedVin", "").orEmpty().let { it.isNotEmpty() && it == prefs.getString("vin", "") },
-            onPair = { begin(true) },
-            onStart = { begin(false) },
+        dashboard = DashboardView(this, initialTeslaName,
+            onStart = { startMonitoring() },
             onStop = {
                 CameraMonitorService.stop(this)
                 prefs.edit().putString("status", "감시를 중지했습니다.").apply()
@@ -146,24 +133,15 @@ class MainActivity : AppCompatActivity() {
             onSpeedCameraAlertSettings = { showSpeedCameraAlertSettings() },
             onPreviewCameraAlert = { previewCameraAlert() }, onMonitoringSettings = { showMonitoringSettings() },
             onCameraList = { startActivity(Intent(this, CameraListActivity::class.java)) },
-            onClearPairing = { clearPairingForReregistration() },
             onExportTrips = { exportTrips.launch("tesla-trip-ledger.csv") },
             onImportTrips = { importTrips.launch(arrayOf("text/csv", "text/comma-separated-values", "application/csv")) },
             onConfigureSheets = { showGoogleSheetsSettings() }, onOpenSheets = { openGoogleSheet() },
             onAppendSampleTrip = { appendSampleTripRow() })
-        vin = dashboard.vin
         status = dashboard.status
         TeslaVehicleCache.load(this, initialVin)?.let { snapshot ->
             dashboard.updateTeslaOverview(initialVin, snapshot.data, lastTeslaUpdateMessage(snapshot.updatedAt))
         }
         dashboard.kakaoStatus.text = "카카오 연결 확인 전"
-        vin.addTextChangedListener(object : android.text.TextWatcher {
-            override fun beforeTextChanged(s: CharSequence?, start: Int, count: Int, after: Int) {}
-            override fun onTextChanged(s: CharSequence?, start: Int, before: Int, count: Int) {
-                dashboard.updatePairing(s.toString().isNotBlank() && s.toString() == prefs.getString("pairedVin", ""))
-            }
-            override fun afterTextChanged(s: android.text.Editable?) {}
-        })
         ViewCompat.setOnApplyWindowInsetsListener(dashboard) { view, insets ->
             val bars = insets.getInsets(WindowInsetsCompat.Type.systemBars() or WindowInsetsCompat.Type.ime())
             view.setPadding(bars.left, bars.top, bars.right, bars.bottom)
@@ -192,7 +170,8 @@ class MainActivity : AppCompatActivity() {
                 }
             }
         }
-        checkKakao()
+        if (hasLocationPermission() && isGpsEnabled()) checkKakao()
+        else dashboard.kakaoStatus.text = "카카오 안전 안내를 사용하려면 위치 권한과 GPS를 켠 뒤 감시를 시작하세요."
     }
     private var kakaoCheck: Job? = null
     private fun showVoiceSettings() {
@@ -559,8 +538,13 @@ class MainActivity : AppCompatActivity() {
                 text = type.label
                 textSize = 16f
                 isChecked = SafetyAlertSettings.isEnabled(this@MainActivity, type)
-                setPadding(0, padding / 4, 0, padding / 4)
-            }.also(panel::addView)
+                minHeight = (64 * resources.displayMetrics.density).toInt()
+                setPadding(0, padding / 2, 0, padding / 2)
+            }.also { control ->
+                panel.addView(control, LinearLayout.LayoutParams(-1, (64 * resources.displayMetrics.density).toInt()).apply {
+                    bottomMargin = (10 * resources.displayMetrics.density).toInt()
+                })
+            }
         }
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("안전 안내 항목 설정")
@@ -575,6 +559,9 @@ class MainActivity : AppCompatActivity() {
     /** Settings that affect only speed-camera timing and the over-limit sound. */
     private fun showSpeedCameraAlertSettings() {
         val padding = (20 * resources.displayMetrics.density).toInt()
+        val controlHeight = (56 * resources.displayMetrics.density).toInt()
+        val toggleHeight = (64 * resources.displayMetrics.density).toInt()
+        val controlGap = (8 * resources.displayMetrics.density).toInt()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padding, padding / 2, padding, padding / 2)
@@ -594,7 +581,11 @@ class MainActivity : AppCompatActivity() {
             text = "제한속도 초과 경고음"
             textSize = 16f
             isChecked = SafetyAlertSettings.isOverspeedToneEnabled(this@MainActivity)
-            setPadding(0, padding / 2, 0, padding / 4)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            minHeight = toggleHeight
+            // Spinner items have a small built-in start inset. Match it so this toggle's
+            // label does not visually protrude to the left.
+            setPadding(controlGap, 0, controlGap, 0)
         }
         val tonePicker = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, OverspeedToneStyle.entries)
@@ -607,10 +598,12 @@ class MainActivity : AppCompatActivity() {
                 sounds.playOverspeed(tonePicker.selectedItem as? OverspeedToneStyle ?: OverspeedToneStyle.SHORT_BEEP)
             }
         }
-        panel.addView(firstAlertDistance)
-        panel.addView(overspeedTone)
-        panel.addView(tonePicker)
-        panel.addView(previewTone)
+        panel.addView(firstAlertDistance, LinearLayout.LayoutParams(-1, controlHeight))
+        panel.addView(overspeedTone, LinearLayout.LayoutParams(-1, toggleHeight).apply {
+            topMargin = controlGap; bottomMargin = controlGap
+        })
+        panel.addView(tonePicker, LinearLayout.LayoutParams(-1, controlHeight))
+        panel.addView(previewTone, LinearLayout.LayoutParams(-1, -2).apply { topMargin = controlGap })
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("과속카메라 알림 설정")
             .setView(panel)
@@ -627,6 +620,9 @@ class MainActivity : AppCompatActivity() {
 
     private fun showLegacyCombinedSafetyAlertSettings() {
         val padding = (20 * resources.displayMetrics.density).toInt()
+        val controlHeight = (56 * resources.displayMetrics.density).toInt()
+        val toggleHeight = (64 * resources.displayMetrics.density).toInt()
+        val controlGap = (8 * resources.displayMetrics.density).toInt()
         val panel = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
             setPadding(padding, padding / 2, padding, padding / 2)
@@ -641,8 +637,13 @@ class MainActivity : AppCompatActivity() {
                 text = type.label
                 textSize = 16f
                 isChecked = SafetyAlertSettings.isEnabled(this@MainActivity, type)
-                setPadding(0, padding / 4, 0, padding / 4)
-            }.also(panel::addView)
+                minHeight = (64 * resources.displayMetrics.density).toInt()
+                setPadding(0, padding / 2, 0, padding / 2)
+            }.also { control ->
+                panel.addView(control, LinearLayout.LayoutParams(-1, (64 * resources.displayMetrics.density).toInt()).apply {
+                    bottomMargin = (10 * resources.displayMetrics.density).toInt()
+                })
+            }
         }
         val firstAlertDistance = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item,
@@ -656,9 +657,13 @@ class MainActivity : AppCompatActivity() {
             text = "과속카메라 제한속도 초과 경고음"
             textSize = 16f
             isChecked = SafetyAlertSettings.isOverspeedToneEnabled(this@MainActivity)
-            setPadding(0, padding / 2, 0, padding / 4)
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            minHeight = toggleHeight
+            setPadding(controlGap, 0, controlGap, 0)
         }
-        panel.addView(overspeedTone)
+        panel.addView(overspeedTone, LinearLayout.LayoutParams(-1, toggleHeight).apply {
+            topMargin = controlGap; bottomMargin = controlGap
+        })
         val tonePicker = Spinner(this).apply {
             adapter = ArrayAdapter(this@MainActivity, android.R.layout.simple_spinner_dropdown_item, OverspeedToneStyle.entries)
             setSelection(OverspeedToneStyle.entries.indexOf(SafetyAlertSettings.overspeedToneStyle(this@MainActivity)))
@@ -671,8 +676,8 @@ class MainActivity : AppCompatActivity() {
                 sounds.playOverspeed(style)
             }
         }
-        panel.addView(tonePicker)
-        panel.addView(previewTone)
+        panel.addView(tonePicker, LinearLayout.LayoutParams(-1, controlHeight))
+        panel.addView(previewTone, LinearLayout.LayoutParams(-1, -2).apply { topMargin = controlGap })
         val scroll = ScrollView(this).apply { addView(panel) }
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("안전 안내 항목 설정")
@@ -927,7 +932,6 @@ class MainActivity : AppCompatActivity() {
             androidx.appcompat.app.AlertDialog.Builder(this@MainActivity)
                 .setTitle("Select Tesla vehicle")
                 .setItems(names) { _, index ->
-                    vin.setText(vehicles[index].vin)
                     prefs.edit().putString("vin", vehicles[index].vin)
                         .putString("tesla_vehicle_name", vehicles[index].name)
                         .putString("tesla_vehicle_name_vin", vehicles[index].vin).apply()
@@ -1038,59 +1042,58 @@ class MainActivity : AppCompatActivity() {
             }
         }
     }
-    private fun requiredPermissions(includeBluetooth: Boolean): Array<String> = buildList {
+    private fun requiredPermissions(): Array<String> = buildList {
         add(Manifest.permission.ACCESS_FINE_LOCATION)
         add(Manifest.permission.ACCESS_COARSE_LOCATION)
-        if (includeBluetooth && Build.VERSION.SDK_INT >= 31) {
-            add(Manifest.permission.BLUETOOTH_SCAN); add(Manifest.permission.BLUETOOTH_CONNECT)
-        }
     }.toTypedArray()
-    private fun clearPairingForReregistration() {
-        val value = vin.text.toString().trim().uppercase(Locale.ROOT)
-        if (!TeslaProtocol.validVin(value)) { status.text = "삭제할 차량의 VIN을 먼저 입력하세요."; return }
+    private fun hasLocationPermission() = requiredPermissions().all {
+        ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+    }
+    private fun isGpsEnabled() = getSystemService(LocationManager::class.java)
+        .isProviderEnabled(LocationManager.GPS_PROVIDER)
+    private fun showLocationPermissionGuide(canOpenSettings: Boolean = false) {
         androidx.appcompat.app.AlertDialog.Builder(this)
-            .setTitle("앱 키 등록 삭제")
-            .setMessage("앱에 저장된 등록 상태와 이 휴대폰의 차량 키를 삭제합니다. 차량 화면의 키 목록은 바뀌지 않으므로, 기존 키가 남아 있다면 차량에서 별도로 삭제하세요. 이후 카드키로 새로 등록할 수 있습니다.")
-            .setNegativeButton("취소", null)
-            .setPositiveButton("삭제") { _, _ ->
-                runCatching { VehicleKey.remove(value) }
-                prefs.edit().remove("pairedVin").apply()
-                dashboard.updatePairing(false)
-                dashboard.updatePairingProgress(false, "")
-                status.text = "앱 키 등록을 삭제했습니다. 카드키로 새로 등록하세요."
-            }.show()
+            .setTitle("카카오 안전 안내 준비")
+            .setMessage("카카오 안전 안내와 카메라 감시는 휴대폰의 정확한 위치와 GPS가 필요합니다.\n\n계속을 누른 뒤 위치 권한을 허용하고 ‘정확한 위치 사용’을 켜 주세요.")
+            .setNegativeButton("나중에", null)
+            .setPositiveButton("권한 허용") { _, _ -> permissions.launch(requiredPermissions()) }
+            .apply {
+                if (canOpenSettings) setNeutralButton("앱 설정") { _, _ ->
+                    startActivity(Intent(Settings.ACTION_APPLICATION_DETAILS_SETTINGS, Uri.parse("package:$packageName")))
+                }
+            }
+            .show()
     }
-    private fun begin(pair: Boolean) {
-        val value = vin.text.toString().trim().uppercase(Locale.ROOT)
-        if (!TeslaProtocol.validVin(value)) { status.text = "VIN 17자리를 확인하세요 (I, O, Q 제외)."; return }
-        if (pair) dashboard.updatePairingProgress(false, "등록 시작")
-        vin.setText(value)
-        prefs.edit().putString("vin", value).apply()
-        val permissions = requiredPermissions(includeBluetooth = pair)
-        if (permissions.any { ContextCompat.checkSelfPermission(this, it) != PackageManager.PERMISSION_GRANTED }) {
-            pendingPair = pair; this.permissions.launch(permissions); return
-        }
-        launchMonitor(pair)
+    private fun showGpsGuide() {
+        androidx.appcompat.app.AlertDialog.Builder(this)
+            .setTitle("GPS를 켜 주세요")
+            .setMessage("카카오 안전 안내와 카메라 감시는 GPS가 켜져 있어야 현재 위치를 확인할 수 있습니다.")
+            .setNegativeButton("나중에", null)
+            .setPositiveButton("위치 설정 열기") { _, _ -> startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+            .show()
     }
-    private fun launchMonitor(pair: Boolean) {
-        // Pairing uses BLE once; ordinary monitoring is explicitly started by this caller.
-        ContextCompat.startForegroundService(this, Intent(this, CameraMonitorService::class.java)
-            .putExtra("pair", pair))
+    private fun launchMonitor() {
+        ContextCompat.startForegroundService(this, Intent(this, CameraMonitorService::class.java))
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
             notifications.launch(Manifest.permission.POST_NOTIFICATIONS)
     }
+    /** Standard monitoring uses only the phone's location; it has no Tesla, VIN, or BLE dependency. */
+    private fun startMonitoring() {
+        if (!hasLocationPermission()) {
+            showLocationPermissionGuide()
+            return
+        }
+        if (!isGpsEnabled()) {
+            showGpsGuide()
+            return
+        }
+        launchMonitor()
+    }
     override fun onStart() {
         super.onStart(); prefs.registerOnSharedPreferenceChangeListener(listener)
-        startTripRecorderIfEnabled()
         status.text = prefs.getString("status", "감시 시작 또는 외부 자동화를 기다리는 중입니다.")
         dashboard.kakaoStatus.text = prefs.getString("kakao_status", "카카오 연결 확인 중…")
-    }
-    private fun startTripRecorderIfEnabled() {
-        if (!prefs.getBoolean("trip_auto_enabled", false) ||
-            !TeslaAuth.isSignedIn(this) ||
-            prefs.getString("vin", "").orEmpty().length != 17) return
-        ContextCompat.startForegroundService(this, Intent(this, kr.co.tesla.cameraalert.trip.TripMonitorService::class.java))
     }
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)

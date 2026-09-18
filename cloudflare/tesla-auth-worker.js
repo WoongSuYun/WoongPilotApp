@@ -132,9 +132,12 @@ export default {
       const session = await sessionFor(env, id);
       if (!session) return json({ error: "session_not_found" }, 401);
       try {
+        // Trip state transitions must use a current Fleet response. Dashboard refreshes may
+        // still use the short cache to protect the quota.
+        const requireFresh = url.searchParams.get("fresh") === "1";
         const cacheKey = `vehicle_data:${id}:${vin}`;
         const cached = await env.TESLA_SESSIONS.get(cacheKey);
-        if (cached) {
+        if (cached && !requireFresh) {
           return new Response(cached, { status: 200, headers: {
             "content-type": "application/json; charset=utf-8", "cache-control": "private, max-age=0",
             "x-woongpilot-cache": "HIT",

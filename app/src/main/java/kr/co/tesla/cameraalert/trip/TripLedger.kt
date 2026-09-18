@@ -42,6 +42,9 @@ object TripLedger {
     fun finish(context: Context, odometerKm: Double, batteryPercent: Int, now: Long): TripRecord? {
         val start = active(context) ?: return null
         val distance = round((odometerKm - start.getDouble("odometerKm")) * 10) / 10
+        // A delayed server response can briefly report an older odometer. Retain the active
+        // trip in that case so the next stationary check can finish it safely.
+        if (distance < 0) return null
         prefs(context).edit().remove(ACTIVE).apply()
         if (distance < 0.1) return null
         val batteryUsed = (start.getInt("batteryPercent") - batteryPercent).takeIf { it >= 0 }

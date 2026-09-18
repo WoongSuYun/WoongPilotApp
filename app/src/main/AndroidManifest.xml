@@ -41,6 +41,5 @@
             android:excludeFromRecents="true"
             android:noHistory="true" />
         <service android:name=".monitor.CameraMonitorService" android:exported="false" android:foregroundServiceType="location|connectedDevice" />
-        <service android:name=".trip.TripMonitorService" android:exported="false" android:foregroundServiceType="dataSync" />
     </application>
 </manifest>

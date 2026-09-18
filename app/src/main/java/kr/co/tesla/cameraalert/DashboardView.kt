@@ -12,33 +12,28 @@ import android.view.Gravity
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
-import androidx.core.content.ContextCompat
 import kr.co.tesla.cameraalert.trip.TripLedger
-import kr.co.tesla.cameraalert.trip.TripMonitorService
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
 
 /** Native dashboard: decorative driving graphic, real service status, and setup controls. */
-class DashboardView(context: Context, savedVin: String, savedTeslaName: String, paired: Boolean,
-    onPair: () -> Unit, onStart: () -> Unit, onStop: () -> Unit,
+class DashboardView(context: Context, savedTeslaName: String,
+    onStart: () -> Unit, onStop: () -> Unit,
     onCheckKakao: () -> Unit, onTeslaLogin: () -> Unit, onTeslaLogout: () -> Unit,
     onWakeTesla: () -> Unit, onRefreshTesla: () -> Unit, onVoiceSettings: () -> Unit,
     onGeminiSettings: () -> Unit, onGeminiAudioLibrary: () -> Unit, onSafetyAlertSettings: () -> Unit,
     onSpeedCameraAlertSettings: () -> Unit,
-    onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit, onCameraList: () -> Unit, onClearPairing: () -> Unit,
+    onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit, onCameraList: () -> Unit,
     private val onExportTrips: () -> Unit, private val onImportTrips: () -> Unit,
     private val onConfigureSheets: () -> Unit, private val onOpenSheets: () -> Unit,
     private val onAppendSampleTrip: () -> Unit
 ) : ScrollView(context) {
-    // Tesla BLE card-key support remains implemented but is not shown in the current UI.
-    private val showVehicleKeySetup = false
     private val ink = Color.rgb(240, 244, 248)
     private val muted = Color.rgb(149, 164, 180)
     private val accent = Color.rgb(114, 235, 198)
     private val surface = Color.rgb(24, 33, 45)
     private val border = Color.rgb(43, 56, 70)
-    val vin = EditText(context)
     val status = TextView(context)
     val kakaoStatus = TextView(context)
     private val teslaBattery = TextView(context)
@@ -58,9 +53,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
     private val teslaStatus = TextView(context)
     private lateinit var teslaLoginAction: androidx.appcompat.widget.AppCompatButton
     private lateinit var teslaLogoutAction: androidx.appcompat.widget.AppCompatButton
-    private val keyBadge = TextView(context)
     private lateinit var headerMessage: TextView
-    private val pairingSteps = TextView(context)
     private val body = LinearLayout(context)
     private val monitorPage = column()
     private val vehiclePage = column()
@@ -308,45 +301,6 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
             space(8)
             addView(action("공공데이터 카메라 목록", false, onCameraList), LinearLayout.LayoutParams(-1, -2))
         }
-        vehiclePage.space(5)
-        val vehicleKeyHeading = text("차량 키 준비", 19f, ink, true)
-        vehiclePage.addView(vehicleKeyHeading); vehiclePage.space(12)
-        val vehicleKeyCard = card(vehiclePage).apply {
-            heading(this, "01", "차량 키 연결", "처음 한 번, 카드키로 승인")
-            space(16)
-            keyBadge.textSize = 12f; keyBadge.setPadding(dp(10), dp(6), dp(10), dp(6))
-            addView(keyBadge, LinearLayout.LayoutParams(-2, -2))
-            updatePairing(paired)
-            pairingSteps.textSize = 13f; pairingSteps.setTextColor(muted)
-            pairingSteps.setLineSpacing(dp(4).toFloat(), 1f)
-            pairingSteps.setPadding(0, dp(12), 0, 0)
-            addView(pairingSteps, LinearLayout.LayoutParams(-1, -2))
-            updatePairingProgress(paired, "")
-            space(14)
-            addView(text("차대번호 · VIN", 12f, muted)); space(6)
-            vin.apply {
-                id = View.generateViewId()
-                hint = "17자리 VIN 입력"; setText(savedVin); setSingleLine()
-                inputType = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_CHARACTERS or InputType.TYPE_TEXT_FLAG_NO_SUGGESTIONS
-                filters = arrayOf(InputFilter.AllCaps(), InputFilter.LengthFilter(17))
-                textSize = 15f; setTextColor(ink); setHintTextColor(muted)
-                background = shape(Color.rgb(13, 22, 32), 12, true)
-                setPadding(dp(14), dp(16), dp(14), dp(16))
-                contentDescription = "차대번호 VIN 17자리"
-            }
-            addView(vin, LinearLayout.LayoutParams(-1, -2)); space(12)
-            addView(action("카드키로 등록하기", false) {
-                AlertDialog.Builder(context).setTitle("카드키 등록 준비")
-                    .setMessage("1. 차량 가까이에서 Bluetooth와 위치를 켜세요.\n\n2. 계속을 누르면 차량을 찾습니다.\n\n3. 앱에 ‘카드키를 차량 콘솔에’라는 안내가 나오면 실물 카드키를 콘솔 리더기에 대고 차량 화면에서 승인하세요.\n\n아래 단계 표시에서 진행 상태를 확인할 수 있습니다.")
-                    .setNegativeButton("취소", null).setPositiveButton("계속") { _, _ -> onPair() }.show()
-            }, LinearLayout.LayoutParams(-1, -2))
-            space(8)
-            addView(action("앱 키 등록 삭제 · 다시 등록", false, onClearPairing), LinearLayout.LayoutParams(-1, -2))
-        }
-        if (!showVehicleKeySetup) {
-            vehicleKeyHeading.visibility = View.GONE
-            vehicleKeyCard.visibility = View.GONE
-        }
         card(guidePage).apply {
             heading(this, "02", "카카오 안전 안내", "목적지 없이 · 과속카메라 안내")
             space(16)
@@ -408,7 +362,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
                 ?: "Tesla 차량 정보를 받아오면 전비 기준 용량을 자동 설정합니다.", 12f, muted))
             space(14)
             addView(text(if (active == null) "다음 운행을 기다리고 있어요" else "● 운행 기록 중", 20f, ink, true))
-            addView(text(if (active == null) "D/R 진입과 P 주차를 자동 감지합니다." else "시작 ${tripTime(active.optLong("startedAt"))} · P 주차 후 자동 저장", 13f, muted))
+            addView(text(if (active == null) "감시 모드 GPS 이동 뒤 Tesla 상태를 확인하고, 5분 정지 후 P면 저장합니다." else "시작 ${tripTime(active.optLong("startedAt"))} · 5분 정지 후 P 확인 시 자동 저장", 13f, muted))
             space(12)
             val automaticMode = Switch(context).apply {
                 text = "자동 기록 모드 사용"
@@ -417,9 +371,7 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
                 setPadding(0, dp(4), 0, dp(4))
                 setOnCheckedChangeListener { _, enabled ->
                     prefs.edit().putBoolean("trip_auto_enabled", enabled)
-                        .putString("trip_status", if (enabled) "자동 기록 모드 켜짐 · 다음 운행 감지 대기" else "자동 기록 모드 꺼짐").apply()
-                    if (enabled) ContextCompat.startForegroundService(context, Intent(context, TripMonitorService::class.java))
-                    else context.stopService(Intent(context, TripMonitorService::class.java))
+                        .putString("trip_status", if (enabled) "자동 기록 모드 켜짐 · 감시 모드 GPS 이동 감지 대기" else "자동 기록 모드 꺼짐").apply()
                     renderTripLog()
                 }
             }
@@ -429,12 +381,12 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
                 if (active != null) accent else muted, true))
             val controls = row().apply { visibility = View.GONE }
             controls.addView(action("자동 기록 시작", true) {
-                prefs.edit().putBoolean("trip_auto_enabled", true).apply()
-                ContextCompat.startForegroundService(context, Intent(context, TripMonitorService::class.java))
+                prefs.edit().putBoolean("trip_auto_enabled", true)
+                    .putString("trip_status", "자동 기록 모드 켜짐 · 감시 모드 GPS 이동 감지 대기").apply()
             }, LinearLayout.LayoutParams(0, -2, 1f))
             controls.addView(action("중지", false) {
-                prefs.edit().putBoolean("trip_auto_enabled", false).apply()
-                context.stopService(Intent(context, TripMonitorService::class.java))
+                prefs.edit().putBoolean("trip_auto_enabled", false)
+                    .putString("trip_status", "자동 기록 모드 꺼짐").apply()
             }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
             addView(controls)
             space(8)
@@ -497,34 +449,6 @@ class DashboardView(context: Context, savedVin: String, savedTeslaName: String, 
     }
     private fun tripTime(time: Long) = SimpleDateFormat("M.d HH:mm", Locale.KOREA).format(Date(time))
     fun refreshTripLog() = renderTripLog()
-    fun updatePairing(paired: Boolean) {
-        keyBadge.text = if (paired) "✓  키 등록됨" else "○  키 등록 필요"
-        keyBadge.setTextColor(if (paired) accent else muted)
-        keyBadge.background = shape(if (paired) Color.rgb(31, 58, 57) else Color.rgb(34, 46, 61), 8)
-    }
-    fun updatePairingProgress(paired: Boolean, serviceStatus: String) {
-        val stage = when {
-            paired || serviceStatus.contains("키 등록 완료") || serviceStatus.contains("키 등록 확인 완료") -> 4
-            serviceStatus.contains("카드키를 차량 콘솔") -> 3
-            serviceStatus.contains("차량 연결") || serviceStatus.contains("서비스 검색") || serviceStatus.contains("알림 연결") -> 2
-            serviceStatus.contains("차량 검색") || serviceStatus.contains("등록 시작") -> 1
-            else -> 0
-        }
-        val failed = serviceStatus.contains("등록 실패") || serviceStatus.contains("키 등록을 확인하지 못했습니다")
-        fun step(number: Int, value: String) = when {
-            failed && number == stage -> "!  $number. $value"
-            number < stage || (number == 4 && paired) -> "✓  $number. $value"
-            number == stage && stage > 0 -> "▶  $number. $value"
-            else -> "○  $number. $value"
-        }
-        pairingSteps.text = listOf(
-            step(1, "VIN 확인 및 차량 찾기"),
-            step(2, "차량 BLE 연결"),
-            step(3, "카드키를 콘솔에 대고 차량 화면에서 승인"),
-            step(4, "차량에 등록된 키 재확인")
-        ).joinToString("\n") + if (failed) "\n\n등록에 실패했습니다. 차량 가까이에서 다시 시도하세요." else ""
-        pairingSteps.setTextColor(if (failed) Color.rgb(255, 150, 130) else muted)
-    }
     fun updateTeslaOverview(vin: String, data: TeslaAuth.VehicleData?, message: String) {
         teslaStatus.text = message
         if (data == null) return

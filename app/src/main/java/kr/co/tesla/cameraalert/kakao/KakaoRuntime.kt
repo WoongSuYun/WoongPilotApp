@@ -29,7 +29,10 @@ object KakaoRuntime {
                 KNSDK.initializeWithAppKey(BuildConfig.KAKAO_NATIVE_APP_KEY, BuildConfig.VERSION_NAME, userId,
                     aLangType = KNLanguageType.KNLanguageType_KOREAN, aCompletion = { error ->
                         ready = error == null
-                        request.complete(error?.let { "카카오 인증 오류 ${it.code} · 앱 키와 키 해시 등록을 확인하세요" })
+                        request.complete(error?.let {
+                            val detail = listOfNotNull(it.msg, it.tagMsg).firstOrNull()?.takeIf(String::isNotBlank)
+                            "카카오 연결 오류 ${it.code}" + if (detail == null) "" else " · $detail"
+                        })
                         pending = null
                     })
             } catch (e: Exception) {
