@@ -21,7 +21,7 @@ class AutomationActionActivity : Activity() {
             ACTION_STOP_MONITORING -> {
                 CameraMonitorService.stop(this)
                 getSharedPreferences("settings", MODE_PRIVATE).edit()
-                    .putString("status", "자동화 요청으로 감시를 종료했습니다.").apply()
+                    .putString("status", "자동화 요청 접수 · GPS 경로 확인 후 감시를 종료합니다.").apply()
             }
         }
         finish()

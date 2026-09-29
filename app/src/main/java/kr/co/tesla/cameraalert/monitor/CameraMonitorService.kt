@@ -60,6 +60,7 @@ class CameraMonitorService : Service(), LocationListener {
         val latitude: Double,
         val longitude: Double,
         val limitKph: Int?,
+        val approachHeading: Double,
         var closestDistanceMeters: Double = Double.POSITIVE_INFINITY,
         var previousDistanceMeters: Double = Double.POSITIVE_INFINITY,
         var movingAwaySamples: Int = 0
@@ -70,6 +71,8 @@ class CameraMonitorService : Service(), LocationListener {
         val id: String,
         val latitude: Double,
         val longitude: Double,
+        val closestDistanceMeters: Double,
+        val approachHeading: Double,
         var farthestDistanceMeters: Double
     )
 
@@ -77,7 +80,8 @@ class CameraMonitorService : Service(), LocationListener {
     private data class DismissedSpeedCamera(
         val id: String,
         val latitude: Double,
-        val longitude: Double
+        val longitude: Double,
+        val approachHeading: Double
     )
 
     override fun onCreate() {
@@ -94,14 +98,18 @@ class CameraMonitorService : Service(), LocationListener {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) {
             val route = RouteLedger.finish(this, System.currentTimeMillis())
-            prefs.edit().putString("status", "감시를 중지했습니다.").apply()
+            // Keep the foreground notification visible while the route is committed.  This is
+            // especially important for Samsung Routines, which closes its action activity
+            // immediately and otherwise gives no visible acknowledgement of the stop request.
+            status("감시 종료 · GPS 경로 확인 중")
+            prefs.edit().putString("monitor_state", "감시 종료 중").apply()
             finishTripAtMonitorStop(route)
             return START_NOT_STICKY
         }
         if (intent?.action == CameraAlertNotification.DISMISS_ACTION) {
             dismissedCameraId = activeCameraId
             activeSpeedCamera?.takeIf { it.id == activeCameraId }?.let {
-                dismissedSpeedCamera = DismissedSpeedCamera(it.id, it.latitude, it.longitude)
+                dismissedSpeedCamera = DismissedSpeedCamera(it.id, it.latitude, it.longitude, it.approachHeading)
             }
             CameraAlertOverlay.hide()
             CameraAlertNotification.cancel(this)
@@ -137,6 +145,7 @@ class CameraMonitorService : Service(), LocationListener {
             location.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
             gpsActive = true
             monitoringActive = true
+            prefs.edit().putString("monitor_state", "감시 중").apply()
             RouteLedger.begin(this, System.currentTimeMillis())
             requestTripStartAtMonitorStart()
             startKakao()
@@ -235,12 +244,17 @@ class CameraMonitorService : Service(), LocationListener {
             if (distance > departed.farthestDistanceMeters) {
                 departed.farthestDistanceMeters = distance
                 overspeedCameraId = null
-                status("${position.speedKph.toInt()}km/h · $source · 경로 복귀 확인 중")
+                status("${position.speedKph.toInt()}km/h · $source · 기존 카메라 이탈 확인 중")
                 return
             }
-            if (distance > departed.farthestDistanceMeters - REAPPROACH_DISTANCE_METERS) {
+            val travelledAway = departed.farthestDistanceMeters - departed.closestDistanceMeters
+            val returnedTowardCamera = distance <= departed.farthestDistanceMeters - REAPPROACH_RETURN_METERS
+            val reversedDirection = headingDifference(position.heading, departed.approachHeading) >= REAPPROACH_TURN_DEGREES
+            val cameraAhead = CameraDetector.isAhead(position, departed.latitude, departed.longitude)
+            if (travelledAway < REAPPROACH_MIN_DEPARTURE_METERS || !returnedTowardCamera ||
+                !reversedDirection || !cameraAhead) {
                 overspeedCameraId = null
-                status("${position.speedKph.toInt()}km/h · $source · 경로 복귀 확인 중")
+                status("${position.speedKph.toInt()}km/h · $source · 기존 카메라 재안내 보류")
                 return
             }
             departedSpeedCamera = null
@@ -256,7 +270,8 @@ class CameraMonitorService : Service(), LocationListener {
                 val distance = CameraDetector.distanceMeters(position.latitude, position.longitude,
                     dismissed.latitude, dismissed.longitude)
                 val returningFromFront = distance >= DISMISSED_CAMERA_REARM_DISTANCE_METERS &&
-                    CameraDetector.isAhead(position, dismissed.latitude, dismissed.longitude)
+                    CameraDetector.isAhead(position, dismissed.latitude, dismissed.longitude) &&
+                    headingDifference(position.heading, dismissed.approachHeading) >= REAPPROACH_TURN_DEGREES
                 if (returningFromFront) {
                     dismissedCameraId = null
                     dismissedSpeedCamera = null
@@ -313,6 +328,7 @@ class CameraMonitorService : Service(), LocationListener {
             if (match.type == SafetyAlertType.SPEED_CAMERA) {
                 activeSpeedCamera = ActiveSpeedCamera(
                     match.id, match.latitude, match.longitude, match.limitKph,
+                    position.heading,
                     closestDistanceMeters = match.distanceMeters,
                     previousDistanceMeters = match.distanceMeters
                 )
@@ -376,8 +392,11 @@ class CameraMonitorService : Service(), LocationListener {
             val telemetryTrip = if (data?.odometerKm != null && battery != null)
                 TripLedger.finish(this@CameraMonitorService, data.odometerKm, battery, System.currentTimeMillis(), route?.startedAt)
             else null
-            if (telemetryTrip != null) tripStatus("차계부 저장 · ${"%.1f".format(telemetryTrip.distanceKm)} km")
-            else saveGpsTrip(route, vin)
+            if (telemetryTrip != null) {
+                val message = "차계부 저장 · ${"%.1f".format(telemetryTrip.distanceKm)} km"
+                tripStatus(message)
+                status("감시 종료")
+            } else saveGpsTrip(route, vin)
             stopSelf()
         }
     }
@@ -388,7 +407,10 @@ class CameraMonitorService : Service(), LocationListener {
     }
     private fun saveGpsTrip(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String) {
         val gpsTrip = TripLedger.recordGpsTrip(this, vin, route)
-        if (gpsTrip != null) tripStatus("GPS 차계부 저장 · ${"%.1f".format(gpsTrip.distanceKm)} km")
+        val message = if (gpsTrip != null) "GPS 차계부 저장 · ${"%.1f".format(gpsTrip.distanceKm)} km"
+        else "운행 기록 없음 · GPS 경로가 50m 이상 수집되지 않았습니다"
+        tripStatus(message)
+        status("감시 종료")
     }
 
     /**
@@ -566,15 +588,16 @@ class CameraMonitorService : Service(), LocationListener {
                 alerts.forgetSpeedCamera(camera.id, camera.latitude, camera.longitude)
                 departedSpeedCamera = null
                 dismissedCameraId = camera.id
-                dismissedSpeedCamera = DismissedSpeedCamera(camera.id, camera.latitude, camera.longitude)
+                dismissedSpeedCamera = DismissedSpeedCamera(
+                    camera.id, camera.latitude, camera.longitude, camera.approachHeading)
                 playCameraPassedTone()
                 status("과속카메라를 통과했습니다")
             } else {
-                // A broad R-curve can increase the straight-line GPS distance before it
-                // points back at the same camera.  Suppress it only while it keeps getting
-                // farther away; re-arm when the distance has meaningfully decreased.
+                // Do not re-arm after a small distance wobble on a broad curve. It takes a
+                // substantial departure plus an opposite-direction approach to be a real return.
                 departedSpeedCamera = DepartedSpeedCamera(
-                    camera.id, camera.latitude, camera.longitude, distance)
+                    camera.id, camera.latitude, camera.longitude, camera.closestDistanceMeters,
+                    camera.approachHeading, distance)
                 status("경로가 변경되어 과속카메라 안내를 종료했습니다")
             }
         }
@@ -603,6 +626,7 @@ class CameraMonitorService : Service(), LocationListener {
         RouteLedger.finish(this, System.currentTimeMillis())
         running = false
         monitoringActive = false
+        prefs.edit().putString("monitor_state", "감시 종료").apply()
         task?.cancel(); scope.cancel(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()
         CameraAlertNotification.cancel(this)
         CameraAlertOverlay.hide()
@@ -620,7 +644,9 @@ class CameraMonitorService : Service(), LocationListener {
         private const val MOVING_AWAY_SAMPLE_DELTA_METERS = 2.0
         private const val TURN_AWAY_CONFIRMATION_SAMPLES = 2
         private const val TURN_AWAY_DISTANCE_METERS = 20.0
-        private const val REAPPROACH_DISTANCE_METERS = 20.0
+        private const val REAPPROACH_MIN_DEPARTURE_METERS = 150.0
+        private const val REAPPROACH_RETURN_METERS = 50.0
+        private const val REAPPROACH_TURN_DEGREES = 135.0
         private const val DISMISSED_CAMERA_REARM_DISTANCE_METERS = 150.0
         private const val TRIP_START_SPEED_KPH = 10.0
         private const val TRIP_STOP_SPEED_KPH = 2.0
@@ -634,13 +660,27 @@ class CameraMonitorService : Service(), LocationListener {
 
         /** Call from the Android Bluetooth-connected routine. */
         fun start(context: android.content.Context) {
-            if (!isRunning()) ContextCompat.startForegroundService(context, Intent(context, CameraMonitorService::class.java))
+            if (!isRunning()) {
+                context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE).edit()
+                    .putString("monitor_state", "감시 시작 중").apply()
+                ContextCompat.startForegroundService(context, Intent(context, CameraMonitorService::class.java))
+            }
         }
 
         /** Call from the Android Bluetooth-disconnected routine. */
         fun stop(context: android.content.Context) {
-            context.stopService(Intent(context, CameraMonitorService::class.java))
+            // Do not stop the service directly: that invokes onDestroy immediately and loses
+            // the finished GPS route before it can be written to the trip ledger.
+            // Sending STOP lets onStartCommand save the route (and optional Tesla end value)
+            // before it calls stopSelf().
+            context.getSharedPreferences("settings", android.content.Context.MODE_PRIVATE).edit()
+                .putString("monitor_state", "감시 종료 요청").apply()
+            ContextCompat.startForegroundService(context,
+                Intent(context, CameraMonitorService::class.java).setAction(STOP))
         }
+
+        private fun headingDifference(first: Double, second: Double): Double =
+            kotlin.math.abs((first - second + 540) % 360 - 180)
     }
 }
 

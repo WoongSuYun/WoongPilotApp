@@ -64,7 +64,7 @@ class TripLogActivity : AppCompatActivity() {
             addView(label(if (active == null) "다음 운행을 기다리고 있어요" else "운행을 자동 기록하고 있어요", 18f, Color.WHITE).apply {
                 typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
             })
-            addView(label(if (active == null) "감시 모드 GPS 이동 뒤 Tesla 상태를 확인하고, 5분 정지 후 P면 저장합니다." else "시작 ${format(active.optLong("startedAt"))} · 5분 정지 후 P 확인 시 자동 저장", 13f, Color.LTGRAY))
+            addView(label(if (active == null) "감시 중 GPS 경로를 기록하고, 감시 종료 시 Tesla 값 또는 GPS 경로로 저장합니다." else "시작 ${format(active.optLong("startedAt"))} · 감시 종료 시 저장", 13f, Color.LTGRAY))
             val controls = LinearLayout(this@TripLogActivity).apply { orientation = LinearLayout.HORIZONTAL }
             controls.addView(action("자동 기록 시작", true) {
             prefs.edit().putBoolean("trip_auto_enabled", true)

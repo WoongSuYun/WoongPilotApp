@@ -75,8 +75,14 @@ class MainActivity : AppCompatActivity() {
             val current = prefs.getString("status", "").orEmpty()
             status.text = current
         }
+        if (key == "monitor_state") runOnUiThread {
+            dashboard.monitorState.text = prefs.getString("monitor_state", "감시 안 함")
+        }
         if (key == "kakao_status") runOnUiThread { dashboard.kakaoStatus.text = prefs.getString("kakao_status", "연결 확인 전") }
-        if (key == "trip_status") runOnUiThread { dashboard.refreshTripLog() }
+        if (key == "trip_status") runOnUiThread {
+            dashboard.tripMonitorStatus.text = prefs.getString("trip_status", "운행기록 대기")
+            dashboard.refreshTripLog()
+        }
     }
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (requiredPermissions().all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })
@@ -123,7 +129,7 @@ class MainActivity : AppCompatActivity() {
             onStart = { startMonitoring() },
             onStop = {
                 CameraMonitorService.stop(this)
-                prefs.edit().putString("status", "감시를 중지했습니다.").apply()
+                prefs.edit().putString("status", "감시 종료 요청 · GPS 경로 확인 중").apply()
             }, onCheckKakao = { checkKakao() }, onTeslaLogin = { TeslaAuth.start(this) },
             onTeslaLogout = { confirmTeslaLogout() }, onWakeTesla = { wakeTeslaAndRefresh() },
             onRefreshTesla = { startTeslaRefresh() }, onVoiceSettings = { showVoiceSettings() },
@@ -139,6 +145,8 @@ class MainActivity : AppCompatActivity() {
             onAppendSampleTrip = { appendSampleTripRow() },
             onOpenRouteLog = { startActivity(Intent(this, RouteLogActivity::class.java)) })
         status = dashboard.status
+        dashboard.monitorState.text = prefs.getString("monitor_state", "감시 안 함")
+        dashboard.tripMonitorStatus.text = prefs.getString("trip_status", "운행기록 대기")
         TeslaVehicleCache.load(this, initialVin)?.let { snapshot ->
             dashboard.updateTeslaOverview(initialVin, snapshot.data, lastTeslaUpdateMessage(snapshot.updatedAt))
         }
@@ -1080,6 +1088,7 @@ class MainActivity : AppCompatActivity() {
             .show()
     }
     private fun launchMonitor() {
+        prefs.edit().putString("monitor_state", "감시 시작 중").apply()
         ContextCompat.startForegroundService(this, Intent(this, CameraMonitorService::class.java))
         if (Build.VERSION.SDK_INT >= 33 &&
             ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED)
@@ -1100,6 +1109,8 @@ class MainActivity : AppCompatActivity() {
     override fun onStart() {
         super.onStart(); prefs.registerOnSharedPreferenceChangeListener(listener)
         status.text = prefs.getString("status", "감시 시작 또는 외부 자동화를 기다리는 중입니다.")
+        dashboard.monitorState.text = prefs.getString("monitor_state", "감시 안 함")
+        dashboard.tripMonitorStatus.text = prefs.getString("trip_status", "운행기록 대기")
         dashboard.kakaoStatus.text = prefs.getString("kakao_status", "카카오 연결 확인 중…")
     }
     override fun onNewIntent(intent: Intent) {

@@ -36,6 +36,8 @@ class DashboardView(context: Context, savedTeslaName: String,
     private val surface = Color.rgb(24, 33, 45)
     private val border = Color.rgb(43, 56, 70)
     val status = TextView(context)
+    val monitorState = TextView(context)
+    val tripMonitorStatus = TextView(context)
     val kakaoStatus = TextView(context)
     private val teslaBattery = TextView(context)
     private val teslaTitle = TextView(context)
@@ -288,9 +290,22 @@ class DashboardView(context: Context, savedTeslaName: String,
             }
             addView(chips); space(18)
             addView(text("감시 상태", 11f, accent, true).apply { letterSpacing = .08f })
-            status.textSize = 15f; status.setTextColor(ink); status.setLineSpacing(dp(4).toFloat(), 1f)
-            status.setPadding(0, dp(6), 0, dp(16)); status.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
+            monitorState.text = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getString("monitor_state", "감시 안 함")
+            monitorState.textSize = 19f; monitorState.setTextColor(accent)
+            monitorState.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+            monitorState.setPadding(0, dp(6), 0, dp(4))
+            addView(monitorState, LinearLayout.LayoutParams(-1, -2))
+            status.textSize = 13f; status.setTextColor(muted); status.setLineSpacing(dp(3).toFloat(), 1f)
+            status.setPadding(0, 0, 0, dp(14)); status.accessibilityLiveRegion = View.ACCESSIBILITY_LIVE_REGION_POLITE
             addView(status, LinearLayout.LayoutParams(-1, -2))
+            addView(text("운행기록 상태", 11f, accent, true).apply { letterSpacing = .08f })
+            tripMonitorStatus.text = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
+                .getString("trip_status", "운행기록 대기")
+            tripMonitorStatus.textSize = 14f; tripMonitorStatus.setTextColor(ink)
+            tripMonitorStatus.setLineSpacing(dp(3).toFloat(), 1f)
+            tripMonitorStatus.setPadding(0, dp(6), 0, dp(16))
+            addView(tripMonitorStatus, LinearLayout.LayoutParams(-1, -2))
             val controls = row()
             controls.addView(action("▶  감시 시작", true, onStart), LinearLayout.LayoutParams(0, -2, 1f))
             controls.addView(action("중지", false, onStop), LinearLayout.LayoutParams(dp(76), -2).apply { marginStart = dp(10) })
@@ -363,7 +378,7 @@ class DashboardView(context: Context, savedTeslaName: String,
                 ?: "Tesla 차량 정보를 받아오면 전비 기준 용량을 자동 설정합니다.", 12f, muted))
             space(14)
             addView(text(if (active == null) "다음 운행을 기다리고 있어요" else "● 운행 기록 중", 20f, ink, true))
-            addView(text(if (active == null) "감시 모드 GPS 이동 뒤 Tesla 상태를 확인하고, 5분 정지 후 P면 저장합니다." else "시작 ${tripTime(active.optLong("startedAt"))} · 5분 정지 후 P 확인 시 자동 저장", 13f, muted))
+            addView(text(if (active == null) "감시 중 GPS 경로를 기록하고, 감시 종료 시 Tesla 값 또는 GPS 경로로 저장합니다." else "시작 ${tripTime(active.optLong("startedAt"))} · 감시 종료 시 저장", 13f, muted))
             space(12)
             val automaticMode = Switch(context).apply {
                 text = "자동 기록 모드 사용"
