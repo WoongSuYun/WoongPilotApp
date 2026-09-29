@@ -20,6 +20,7 @@ import kr.co.tesla.cameraalert.voice.AppSoundPlayer
 import kr.co.tesla.cameraalert.voice.GeminiTts
 import kr.co.tesla.cameraalert.trip.GoogleSheetsSync
 import kr.co.tesla.cameraalert.trip.TripLedger
+import kr.co.tesla.cameraalert.route.RouteLedger
 import kotlinx.coroutines.*
 
 class CameraMonitorService : Service(), LocationListener {
@@ -52,6 +53,7 @@ class CameraMonitorService : Service(), LocationListener {
     private var tripAutoEnabledLast = false
     private var tripReadyLast = false
     private var tripObservedVin = ""
+    private var tripStartSnapshotRequested = false
 
     private data class ActiveSpeedCamera(
         val id: String,
@@ -91,8 +93,10 @@ class CameraMonitorService : Service(), LocationListener {
     }
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == STOP) {
+            val route = RouteLedger.finish(this, System.currentTimeMillis())
             prefs.edit().putString("status", "감시를 중지했습니다.").apply()
-            stopSelf(); return START_NOT_STICKY
+            finishTripAtMonitorStop(route)
+            return START_NOT_STICKY
         }
         if (intent?.action == CameraAlertNotification.DISMISS_ACTION) {
             dismissedCameraId = activeCameraId
@@ -133,6 +137,8 @@ class CameraMonitorService : Service(), LocationListener {
             location.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
             gpsActive = true
             monitoringActive = true
+            RouteLedger.begin(this, System.currentTimeMillis())
+            requestTripStartAtMonitorStart()
             startKakao()
             gpsWatchdog = scope.launch {
                 while (gpsActive && isActive) {
@@ -193,7 +199,8 @@ class CameraMonitorService : Service(), LocationListener {
         if (!fix.hasAccuracy() || fix.accuracy > 40f) {
             status("휴대폰 GPS 감시 중 · 위치 정확도 확인 중"); return
         }
-        observeTripGps(fix)
+        // Tesla telemetry is deliberately limited to the monitor's start and stop actions.
+        RouteLedger.observe(this, fix)
         if (!fix.hasSpeed() || fix.speed < 2f) {
             status("차량 정차 중 · 카메라 감시 준비됨"); return
         }
@@ -312,7 +319,7 @@ class CameraMonitorService : Service(), LocationListener {
                 if (match.limitKph != null && prefs.getBoolean("floating_alert_enabled", false))
                     CameraAlertOverlay.show(this, match.distanceMeters.toInt(), match.limitKph, keepVisible = true)
             }
-            scope.launch {
+            if (!isMuted()) scope.launch {
                 val geminiSpoken = runCatching {
                     geminiSpeaker.speakSafetyWarning(match.type, announcedDistance, match.limitKph)
                 }.getOrDefault(false)
@@ -327,6 +334,63 @@ class CameraMonitorService : Service(), LocationListener {
             status(detail)
         }
     }
+    /** Exactly one Tesla request at monitor start; movement and GPS samples never trigger retries. */
+    private fun requestTripStartAtMonitorStart() {
+        if (tripStartSnapshotRequested || !prefs.getBoolean("trip_auto_enabled", false)) return
+        val vin = prefs.getString("vin", "").orEmpty()
+        if (vin.length != 17 || !TeslaAuth.isSignedIn(this)) return
+        tripStartSnapshotRequested = true
+        tripStatus("감시 시작 · Tesla 차계부 시작값 확인 중")
+        scope.launch {
+            val data = withContext(Dispatchers.IO) {
+                runCatching { TeslaAuth.vehicleData(this@CameraMonitorService, vin, requireFresh = true) }
+            }.getOrNull()
+            if (data?.odometerKm != null) {
+                val battery = data.usableBatteryPercent ?: data.batteryPercent
+                if (battery != null) {
+                    TripLedger.begin(this@CameraMonitorService, vin, data.odometerKm, battery, data.model, data.trim,
+                        System.currentTimeMillis())
+                    tripStatus("감시 중 · Tesla 시작값 저장됨")
+                    return@launch
+                }
+            }
+            tripStatus("감시 중 · Tesla 시작값 없음 · GPS 차계부로 저장")
+        }
+    }
+
+    /** Exactly one Tesla request at monitor stop, then falls back to the saved GPS route. */
+    private fun finishTripAtMonitorStop(route: kr.co.tesla.cameraalert.route.RouteRecord?) {
+        val vin = prefs.getString("vin", "").orEmpty()
+        val canRequest = prefs.getBoolean("trip_auto_enabled", false) && vin.length == 17 &&
+            TeslaAuth.isSignedIn(this)
+        if (!canRequest) {
+            saveGpsTripAndStop(route, vin)
+            return
+        }
+        tripStatus("감시 종료 · Tesla 차계부 종료값 확인 중")
+        scope.launch {
+            val data = withContext(Dispatchers.IO) {
+                runCatching { TeslaAuth.vehicleData(this@CameraMonitorService, vin, requireFresh = true) }
+            }.getOrNull()
+            val battery = data?.usableBatteryPercent ?: data?.batteryPercent
+            val telemetryTrip = if (data?.odometerKm != null && battery != null)
+                TripLedger.finish(this@CameraMonitorService, data.odometerKm, battery, System.currentTimeMillis(), route?.startedAt)
+            else null
+            if (telemetryTrip != null) tripStatus("차계부 저장 · ${"%.1f".format(telemetryTrip.distanceKm)} km")
+            else saveGpsTrip(route, vin)
+            stopSelf()
+        }
+    }
+
+    private fun saveGpsTripAndStop(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String) {
+        saveGpsTrip(route, vin)
+        stopSelf()
+    }
+    private fun saveGpsTrip(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String) {
+        val gpsTrip = TripLedger.recordGpsTrip(this, vin, route)
+        if (gpsTrip != null) tripStatus("GPS 차계부 저장 · ${"%.1f".format(gpsTrip.distanceKm)} km")
+    }
+
     /**
      * Uses the already-running monitor GPS as a low-cost trip trigger. Tesla is contacted only
      * after sustained movement and after a sustained stop; it is never polled while moving.
@@ -465,8 +529,9 @@ class CameraMonitorService : Service(), LocationListener {
         if (prefs.getString("trip_status", "") != text) prefs.edit().putString("trip_status", text).apply()
     }
 
-    private fun playFallbackTone() = sounds.playFallbackWarning()
-    private fun playOverspeedTone() = sounds.playOverspeed(SafetyAlertSettings.overspeedToneStyle(this))
+    private fun isMuted() = prefs.getBoolean("monitor_muted", false)
+    private fun playFallbackTone() { if (!isMuted()) sounds.playFallbackWarning() }
+    private fun playOverspeedTone() { if (!isMuted()) sounds.playOverspeed(SafetyAlertSettings.overspeedToneStyle(this)) }
     /**
      * Clears a camera after it has been passed, or when a turn takes the car away before it is
      * reached. The latter needs consecutive GPS samples to avoid dismissing the badge from normal
@@ -518,7 +583,7 @@ class CameraMonitorService : Service(), LocationListener {
             CameraAlertOverlay.show(this, distance.toInt(), camera.limitKph, keepVisible = true)
         }
     }
-    private fun playCameraPassedTone() = sounds.playCameraPassed()
+    private fun playCameraPassedTone() { if (!isMuted()) sounds.playCameraPassed() }
     override fun onProviderDisabled(provider: String) { if (gpsActive) status("GPS가 꺼졌습니다 · 위치를 켜 주세요") }
     override fun onProviderEnabled(provider: String) {}
     @Deprecated("Legacy callback")
@@ -535,6 +600,7 @@ class CameraMonitorService : Service(), LocationListener {
         .addAction(android.R.drawable.ic_menu_close_clear_cancel, "감시 종료", PendingIntent.getService(this, 1, Intent(this, CameraMonitorService::class.java)
             .setAction(STOP), PendingIntent.FLAG_IMMUTABLE)).build()
     override fun onDestroy() {
+        RouteLedger.finish(this, System.currentTimeMillis())
         running = false
         monitoringActive = false
         task?.cancel(); scope.cancel(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()

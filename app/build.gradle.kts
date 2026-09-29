@@ -67,6 +67,7 @@ android.applicationVariants.all {
 dependencies {
     implementation("com.google.android.gms:play-services-auth:21.3.0")
     implementation("com.kakaomobility.knsdk:knsdk_ui:1.12.7")
+    implementation("com.kakao.maps.open:android:2.15.2")
     implementation("androidx.constraintlayout:constraintlayout:2.1.4")
     implementation("androidx.core:core-ktx:1.15.0")
     implementation("androidx.appcompat:appcompat:1.7.0")

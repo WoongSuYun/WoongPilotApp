@@ -136,7 +136,8 @@ class MainActivity : AppCompatActivity() {
             onExportTrips = { exportTrips.launch("tesla-trip-ledger.csv") },
             onImportTrips = { importTrips.launch(arrayOf("text/csv", "text/comma-separated-values", "application/csv")) },
             onConfigureSheets = { showGoogleSheetsSettings() }, onOpenSheets = { openGoogleSheet() },
-            onAppendSampleTrip = { appendSampleTripRow() })
+            onAppendSampleTrip = { appendSampleTripRow() },
+            onOpenRouteLog = { startActivity(Intent(this, RouteLogActivity::class.java)) })
         status = dashboard.status
         TeslaVehicleCache.load(this, initialVin)?.let { snapshot ->
             dashboard.updateTeslaOverview(initialVin, snapshot.data, lastTeslaUpdateMessage(snapshot.updatedAt))
@@ -742,6 +743,11 @@ class MainActivity : AppCompatActivity() {
             isChecked = prefs.getBoolean("floating_alert_enabled", false)
         }
         panel.addView(floating)
+        val muted = Switch(this).apply {
+            text = "무음 · 감시 중 모든 안내음 끄기"
+            isChecked = prefs.getBoolean("monitor_muted", false)
+        }
+        panel.addView(muted)
         panel.addView(TextView(this).apply {
             text = "다른 앱 위에 표시 권한이 있어야 하며, 단속 경고 중에만 제한속도와 거리를 띄웁니다."
             setPadding(0, 0, 0, padding / 2)
@@ -760,7 +766,8 @@ class MainActivity : AppCompatActivity() {
             .setView(panel)
             .setNegativeButton("취소", null)
             .setPositiveButton("저장") { _, _ ->
-                prefs.edit().putBoolean("floating_alert_enabled", floating.isChecked).apply()
+                prefs.edit().putBoolean("floating_alert_enabled", floating.isChecked)
+                    .putBoolean("monitor_muted", muted.isChecked).apply()
                 if (!floating.isChecked) kr.co.tesla.cameraalert.monitor.CameraAlertOverlay.hide()
                 if (floating.isChecked && !Settings.canDrawOverlays(this)) {
                     status.text = "플로팅 아이콘을 쓰려면 ‘다른 앱 위에 표시’ 권한을 허용해 주세요."

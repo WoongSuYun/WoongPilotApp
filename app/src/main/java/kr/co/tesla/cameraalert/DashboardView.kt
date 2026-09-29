@@ -13,6 +13,7 @@ import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
 import kr.co.tesla.cameraalert.trip.TripLedger
+import kr.co.tesla.cameraalert.route.RouteLedger
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -27,7 +28,7 @@ class DashboardView(context: Context, savedTeslaName: String,
     onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit, onCameraList: () -> Unit,
     private val onExportTrips: () -> Unit, private val onImportTrips: () -> Unit,
     private val onConfigureSheets: () -> Unit, private val onOpenSheets: () -> Unit,
-    private val onAppendSampleTrip: () -> Unit
+    private val onAppendSampleTrip: () -> Unit, private val onOpenRouteLog: () -> Unit
 ) : ScrollView(context) {
     private val ink = Color.rgb(240, 244, 248)
     private val muted = Color.rgb(149, 164, 180)
@@ -399,16 +400,13 @@ class DashboardView(context: Context, savedTeslaName: String,
             space(8)
             addView(action("연결된 Google Sheets 열기", false, onOpenSheets), LinearLayout.LayoutParams(-1, -2))
             space(8)
-            addView(action("스프레드시트 샘플 운행 추가", false, onAppendSampleTrip), LinearLayout.LayoutParams(-1, -2))
-            space(8)
-            addView(action("표시 예", false) { showTripCardPreview() }, LinearLayout.LayoutParams(-1, -2))
+            addView(action("예시 경로 카드 추가", false) { addSampleRouteTrip() }, LinearLayout.LayoutParams(-1, -2))
         }
         val records = TripLedger.records(context, vinValue)
         val distance = records.sumOf { it.distanceKm }
         val energy = records.mapNotNull { it.estimatedKwh }.sum()
         val minutes = records.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
         val efficiency = if (energy > 0) distance / energy else null
-        val batteryUsed = records.mapNotNull { it.batteryUsedPercent }.sum()
         card(tripPage).apply {
             addView(text("누적 운행", 13f, accent, true))
             space(10)
@@ -422,15 +420,33 @@ class DashboardView(context: Context, savedTeslaName: String,
             second.addView(tripMetric("평균 전비", efficiency?.let { "${"%.1f".format(it)} km/kWh" } ?: "—"), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
             addView(second)
             space(10)
-            addView(text("${records.size}회 운행 · 배터리 총 ${batteryUsed}% 사용", 13f, muted, true))
+            addView(text("${records.size}회 운행", 13f, muted, true))
         }
         tripPage.addView(text("운행 기록", 18f, ink, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         if (records.isEmpty()) {
             tripPage.addView(text("저장된 운행이 없습니다. 자동 기록을 켠 뒤 주행해 보세요.", 14f, muted))
         }
         records.forEach { trip ->
+            val routeStartedAt = trip.routeStartedAt ?: RouteLedger.matchingStart(context, trip.startedAt, trip.endedAt)
             card(tripPage).apply {
-                addView(text(tripTime(trip.startedAt), 13f, accent, true))
+                val header = row()
+                header.addView(text(tripTime(trip.startedAt), 13f, accent, true), LinearLayout.LayoutParams(0, -2, 1f))
+                header.addView(TextView(context).apply {
+                    text = "×"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(muted)
+                    background = shape(Color.rgb(34, 46, 61), 12)
+                    setOnClickListener {
+                        AlertDialog.Builder(context)
+                            .setTitle("운행기록 삭제")
+                            .setMessage("이 운행기록을 삭제할까요? 누적 운행에도 즉시 제외됩니다.")
+                            .setNegativeButton("취소", null)
+                            .setPositiveButton("삭제") { _, _ ->
+                                TripLedger.delete(context, trip.vin, trip.startedAt, trip.endedAt)
+                                routeStartedAt?.let { RouteLedger.delete(context, it) }
+                                renderTripLog()
+                            }.show()
+                    }
+                }, LinearLayout.LayoutParams(dp(36), dp(36)))
+                addView(header)
                 addView(text("${tripTime(trip.startedAt)} → ${tripTime(trip.endedAt)}", 12f, muted))
                 space(12)
                 val first = row()
@@ -444,10 +460,25 @@ class DashboardView(context: Context, savedTeslaName: String,
                 addView(second)
                 space(10)
                 addView(text(tripBattery(trip), 14f, muted, true))
+                routeStartedAt?.let { routeStartedAt ->
+                    space(10)
+                    addView(action("경로 보기", false) {
+                        context.startActivity(Intent(context, RouteMapActivity::class.java)
+                            .putExtra(RouteMapActivity.EXTRA_STARTED_AT, routeStartedAt))
+                    }, LinearLayout.LayoutParams(-1, -2))
+                }
             }
         }
     }
     private fun tripTime(time: Long) = SimpleDateFormat("M.d HH:mm", Locale.KOREA).format(Date(time))
+    private fun addSampleRouteTrip() {
+        val route = RouteLedger.addSample(context)
+        val vin = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("vin", "").orEmpty()
+        TripLedger.recordGpsTrip(context, vin, route)
+        onAppendSampleTrip()
+        Toast.makeText(context, "예시 GPS 운행기록을 추가했습니다.", Toast.LENGTH_SHORT).show()
+        renderTripLog()
+    }
     fun refreshTripLog() = renderTripLog()
     fun updateTeslaOverview(vin: String, data: TeslaAuth.VehicleData?, message: String) {
         teslaStatus.text = message

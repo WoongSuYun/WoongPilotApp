@@ -3,13 +3,14 @@ package kr.co.tesla.cameraalert.trip
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import kr.co.tesla.cameraalert.route.RouteRecord
 import java.io.BufferedReader
 import kotlin.math.round
 
 data class TripRecord(
     val vin: String, val startedAt: Long, val endedAt: Long,
     val distanceKm: Double, val batteryUsedPercent: Int?, val estimatedKwh: Double?, val kmPerKwh: Double?,
-    val batteryStartPercent: Int?, val batteryEndPercent: Int?
+    val batteryStartPercent: Int?, val batteryEndPercent: Int?, val routeStartedAt: Long? = null
 )
 
 /** Small app-private trip ledger. Odometer is the source of truth for trip distance. */
@@ -39,7 +40,7 @@ object TripLedger {
         prefs(context).edit().putString(ACTIVE, value.toString()).apply()
     }
 
-    fun finish(context: Context, odometerKm: Double, batteryPercent: Int, now: Long): TripRecord? {
+    fun finish(context: Context, odometerKm: Double, batteryPercent: Int, now: Long, routeStartedAt: Long? = null): TripRecord? {
         val start = active(context) ?: return null
         val distance = round((odometerKm - start.getDouble("odometerKm")) * 10) / 10
         // A delayed server response can briefly report an older odometer. Retain the active
@@ -53,7 +54,7 @@ object TripLedger {
         val kwh = batteryUsed?.let { percent -> round(capacity * percent) / 100.0 }
         val kmPerKwh = kwh?.takeIf { it > 0 }?.let { round(distance / it * 10) / 10.0 }
         val record = TripRecord(start.getString("vin"), start.getLong("startedAt"), now, distance, batteryUsed, kwh, kmPerKwh,
-            start.getInt("batteryPercent"), batteryPercent)
+            start.getInt("batteryPercent"), batteryPercent, routeStartedAt)
         val records = JSONArray(prefs(context).getString(RECORDS, "[]"))
         records.put(JSONObject().apply {
             put("vin", record.vin); put("startedAt", record.startedAt); put("endedAt", record.endedAt)
@@ -66,6 +67,28 @@ object TripLedger {
         return record
     }
 
+    /** Saves a phone-GPS trip when Tesla telemetry is unavailable. Battery values intentionally stay empty. */
+    fun recordGpsTrip(context: Context, vin: String, route: RouteRecord?): TripRecord? {
+        route ?: return null
+        prefs(context).edit().remove(ACTIVE).apply()
+        val record = TripRecord(vin, route.startedAt, route.endedAt, route.distanceKm,
+            null, null, null, null, null, route.startedAt)
+        append(context, record)
+        return record
+    }
+
+    fun delete(context: Context, vin: String, startedAt: Long, endedAt: Long) {
+        val kept = JSONArray()
+        val records = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        for (index in 0 until records.length()) {
+            val record = records.optJSONObject(index) ?: continue
+            val same = record.optString("vin") == vin && record.optLong("startedAt") == startedAt &&
+                record.optLong("endedAt") == endedAt
+            if (!same) kept.put(record)
+        }
+        prefs(context).edit().putString(RECORDS, kept.toString()).apply()
+    }
+
     fun active(context: Context): JSONObject? = prefs(context).getString(ACTIVE, null)?.let(::JSONObject)
     fun records(context: Context, vin: String): List<TripRecord> {
         val values = JSONArray(prefs(context).getString(RECORDS, "[]"))
@@ -75,7 +98,7 @@ object TripLedger {
             TripRecord(value.getString("vin"), value.getLong("startedAt"), value.getLong("endedAt"),
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
-                batteryStartPercent(value), batteryEndPercent(value))
+                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value))
         }.sortedByDescending { it.startedAt }
     }
 
@@ -127,17 +150,25 @@ object TripLedger {
             runCatching { TripRecord(value.getString("vin"), value.getLong("startedAt"), value.getLong("endedAt"),
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
-                batteryStartPercent(value), batteryEndPercent(value)) }.getOrNull()
+                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value)) }.getOrNull()
         }
+    }
+    private fun append(context: Context, record: TripRecord) {
+        val records = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        records.put(toJson(record))
+        while (records.length() > 200) records.remove(0)
+        prefs(context).edit().putString(RECORDS, records.toString()).apply()
+    }
+    private fun toJson(record: TripRecord) = JSONObject().apply {
+        put("vin", record.vin); put("startedAt", record.startedAt); put("endedAt", record.endedAt)
+        put("distanceKm", record.distanceKm); put("batteryUsedPercent", record.batteryUsedPercent)
+        put("estimatedKwh", record.estimatedKwh); put("kmPerKwh", record.kmPerKwh)
+        put("batteryStartPercent", record.batteryStartPercent); put("batteryEndPercent", record.batteryEndPercent)
+        put("routeStartedAt", record.routeStartedAt)
     }
     private fun saveAll(context: Context, values: List<TripRecord>) {
         val json = JSONArray()
-        values.sortedByDescending { it.startedAt }.take(200).forEach { record -> json.put(JSONObject().apply {
-            put("vin", record.vin); put("startedAt", record.startedAt); put("endedAt", record.endedAt)
-            put("distanceKm", record.distanceKm); put("batteryUsedPercent", record.batteryUsedPercent)
-            put("estimatedKwh", record.estimatedKwh); put("kmPerKwh", record.kmPerKwh)
-            put("batteryStartPercent", record.batteryStartPercent); put("batteryEndPercent", record.batteryEndPercent)
-        }) }
+        values.sortedByDescending { it.startedAt }.take(200).forEach { record -> json.put(toJson(record)) }
         prefs(context).edit().putString(RECORDS, json.toString()).apply()
     }
     private fun csv(value: String) = "\"${value.replace("\"", "\"\"")}\""
@@ -186,5 +217,7 @@ object TripLedger {
         if (value.isNull("batteryStartPercent")) null else value.getInt("batteryStartPercent")
     private fun batteryEndPercent(value: JSONObject): Int? =
         if (value.isNull("batteryEndPercent")) null else value.getInt("batteryEndPercent")
+    private fun routeStartedAt(value: JSONObject): Long? =
+        if (value.isNull("routeStartedAt")) null else value.getLong("routeStartedAt")
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

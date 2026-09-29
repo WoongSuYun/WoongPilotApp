@@ -15,6 +15,9 @@ dependencyResolutionManagement {
         maven("https://devrepo.kakao.com/nexus/content/groups/public/") {
             content { includeGroup("com.kakao.sdk") }
         }
+        maven("https://devrepo.kakao.com/nexus/repository/kakaomap-releases/") {
+            content { includeGroup("com.kakao.maps.open") }
+        }
     }
 }
 rootProject.name = "TeslaCameraAlert"
