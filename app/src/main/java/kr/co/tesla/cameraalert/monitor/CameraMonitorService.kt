@@ -396,22 +396,44 @@ class CameraMonitorService : Service(), LocationListener {
                 val message = "차계부 저장 · ${"%.1f".format(telemetryTrip.distanceKm)} km"
                 tripStatus(message)
                 status("감시 종료")
-            } else saveGpsTrip(route, vin)
+                val uploaded = syncTripToGoogleSheets(telemetryTrip)
+                if (uploaded > 0) tripStatus("$message · Google Sheets ${uploaded}건 기록 완료")
+            } else {
+                val gpsTrip = saveGpsTrip(route, vin)
+                if (gpsTrip != null) {
+                    val uploaded = syncTripToGoogleSheets(gpsTrip)
+                    if (uploaded > 0) tripStatus("GPS 차계부 저장 · Google Sheets ${uploaded}건 기록 완료")
+                }
+            }
             stopSelf()
         }
     }
 
     private fun saveGpsTripAndStop(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String) {
-        saveGpsTrip(route, vin)
-        stopSelf()
+        val gpsTrip = saveGpsTrip(route, vin)
+        scope.launch {
+            if (gpsTrip != null) {
+                val uploaded = syncTripToGoogleSheets(gpsTrip)
+                if (uploaded > 0) tripStatus("GPS 차계부 저장 · Google Sheets ${uploaded}건 기록 완료")
+            }
+            stopSelf()
+        }
     }
-    private fun saveGpsTrip(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String) {
+    private fun saveGpsTrip(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String): kr.co.tesla.cameraalert.trip.TripRecord? {
         val gpsTrip = TripLedger.recordGpsTrip(this, vin, route)
         val message = if (gpsTrip != null) "GPS 차계부 저장 · ${"%.1f".format(gpsTrip.distanceKm)} km"
         else "운행 기록 없음 · GPS 경로가 50m 이상 수집되지 않았습니다"
         tripStatus(message)
         status("감시 종료")
+        return gpsTrip
     }
+
+    /** Queue before stopping the service, so its coroutine scope cannot cancel the upload. */
+    private suspend fun syncTripToGoogleSheets(record: kr.co.tesla.cameraalert.trip.TripRecord): Int =
+        withContext(Dispatchers.IO) {
+            GoogleSheetsSync.enqueue(this@CameraMonitorService, record)
+            GoogleSheetsSync.syncPending(this@CameraMonitorService)
+        }
 
     /**
      * Uses the already-running monitor GPS as a low-cost trip trigger. Tesla is contacted only
