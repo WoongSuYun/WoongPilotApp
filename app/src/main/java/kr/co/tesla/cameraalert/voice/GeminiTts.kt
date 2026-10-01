@@ -92,6 +92,9 @@ class GeminiTts(context: Context) {
     fun clearApiKey() = GeminiApiKeyStore.clear(appContext)
     fun clearCachedAudio() = audioCache.clear()
     fun cachedAudioItems(): List<CachedAudioItem> = audioCache.list()
+    /** Portable cache entries contain generated audio only; API keys are never exported. */
+    fun backupCachedAudio(): JSONArray = audioCache.backup()
+    fun restoreCachedAudio(backup: JSONArray): Int = audioCache.restore(backup)
 
     /** Replays a cached item only; it never makes a Gemini API request. */
     suspend fun playCachedAudio(cacheKey: String): Boolean = withContext(Dispatchers.IO) {
@@ -385,6 +388,41 @@ class GeminiTts(context: Context) {
             directory.listFiles()?.forEach { file -> runCatching { file.delete() } }
         }
 
+        fun backup(): JSONArray = JSONArray().apply {
+            directory.listFiles()?.filter { it.isFile }?.sortedByDescending { it.lastModified() }?.forEach { file ->
+                val bytes = runCatching { file.readBytes() }.getOrNull() ?: return@forEach
+                if (bytes.size !in 1..MAX_ENTRY_FILE_BYTES || readEntry(file) == null) return@forEach
+                put(JSONObject().apply {
+                    put("key", file.nameWithoutExtension)
+                    put("savedAt", file.lastModified())
+                    put("data", Base64.encodeToString(bytes, Base64.NO_WRAP))
+                })
+            }
+        }
+
+        fun restore(backup: JSONArray): Int {
+            if (!directory.exists() && !directory.mkdirs()) return 0
+            var restored = 0
+            for (index in 0 until backup.length()) {
+                val item = backup.optJSONObject(index) ?: continue
+                val key = item.optString("key")
+                if (!key.matches(Regex("[a-f0-9]{64}"))) continue
+                val target = File(directory, "$key.bin")
+                if (readEntry(target) != null) continue
+                val bytes = runCatching { Base64.decode(item.optString("data"), Base64.DEFAULT) }.getOrNull() ?: continue
+                if (bytes.size !in 1..MAX_ENTRY_FILE_BYTES) continue
+                val saved = runCatching {
+                    target.outputStream().use { it.write(bytes) }
+                    require(readEntry(target) != null)
+                    item.optLong("savedAt").takeIf { it > 0 }?.let(target::setLastModified)
+                    true
+                }.getOrDefault(false)
+                if (saved) restored++ else runCatching { target.delete() }
+            }
+            trim()
+            return restored
+        }
+
         private fun trim() {
             var bytes = 0L
             var entries = 0
@@ -431,9 +469,10 @@ class GeminiTts(context: Context) {
 
         private companion object {
             const val MAGIC = 0x57505432 // WPT2
-            const val MAX_ENTRIES = 40
+            const val MAX_ENTRIES = 100
             const val MAX_AUDIO_BYTES = 1_500_000
-            const val MAX_CACHE_BYTES = 12L * 1024 * 1024
+            const val MAX_CACHE_BYTES = 30L * 1024 * 1024
+            const val MAX_ENTRY_FILE_BYTES = MAX_AUDIO_BYTES + 65_536
         }
     }
 

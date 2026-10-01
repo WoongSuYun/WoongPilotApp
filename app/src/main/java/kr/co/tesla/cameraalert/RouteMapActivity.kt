@@ -23,12 +23,13 @@ class RouteMapActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val route = RouteLedger.records(this).firstOrNull {
-            it.startedAt == intent.getLongExtra(EXTRA_STARTED_AT, -1L)
-        } ?: run { finish(); return }
+        val routeIds = intent.getLongArrayExtra(EXTRA_STARTED_ATS)?.toList()
+            ?: listOf(intent.getLongExtra(EXTRA_STARTED_AT, -1L))
+        val routes = RouteLedger.records(this).filter { it.startedAt in routeIds }
+        if (routes.isEmpty()) { finish(); return }
         title = "주행 경로 지도"
         KakaoMapSdk.init(this, BuildConfig.KAKAO_NATIVE_APP_KEY)
-        val points = route.points.map { LatLng.from(it.latitude, it.longitude) }
+        val points = routes.flatMap { route -> route.points.map { LatLng.from(it.latitude, it.longitude) } }
         mapView = MapView(this)
         setContentView(mapView)
         mapView.start(object : MapLifeCycleCallback() {
@@ -36,13 +37,25 @@ class RouteMapActivity : AppCompatActivity() {
             override fun onMapError(error: Exception) = Unit
         }, object : KakaoMapReadyCallback() {
             override fun onMapReady(kakaoMap: KakaoMap) {
-                val styles = RouteLineStylesSet.from(
-                    RouteLineStyles.from(RouteLineStyle.from(14f, Color.rgb(0, 168, 107), 3f, Color.WHITE))
+                val routeColors = listOf(
+                    Color.rgb(0, 168, 107),  // green
+                    Color.rgb(42, 130, 228), // blue
+                    Color.rgb(242, 142, 43), // orange
+                    Color.rgb(156, 91, 204), // purple
+                    Color.rgb(224, 82, 99)   // red
                 )
-                val segment = RouteLineSegment.from(points).setStyles(styles.getStyles(0))
-                kakaoMap.routeLineManager?.layer?.addRouteLine(
-                    RouteLineOptions.from(segment).setStylesSet(styles)
-                )
+                routes.forEachIndexed { index, route ->
+                    val routePoints = route.points.map { LatLng.from(it.latitude, it.longitude) }
+                    if (routePoints.size >= 2) {
+                        val styles = RouteLineStylesSet.from(
+                            RouteLineStyles.from(RouteLineStyle.from(14f, routeColors[index % routeColors.size], 3f, Color.WHITE))
+                        )
+                        val segment = RouteLineSegment.from(routePoints).setStyles(styles.getStyles(0))
+                        kakaoMap.routeLineManager?.layer?.addRouteLine(
+                            RouteLineOptions.from(segment).setStylesSet(styles)
+                        )
+                    }
+                }
                 kakaoMap.moveCamera(CameraUpdateFactory.fitMapPoints(points.toTypedArray(), 72))
             }
         })
@@ -51,5 +64,8 @@ class RouteMapActivity : AppCompatActivity() {
     override fun onResume() { super.onResume(); if (::mapView.isInitialized) mapView.resume() }
     override fun onPause() { if (::mapView.isInitialized) mapView.pause(); super.onPause() }
     override fun onDestroy() { if (::mapView.isInitialized) mapView.finish(); super.onDestroy() }
-    companion object { const val EXTRA_STARTED_AT = "started_at" }
+    companion object {
+        const val EXTRA_STARTED_AT = "started_at"
+        const val EXTRA_STARTED_ATS = "started_ats"
+    }
 }

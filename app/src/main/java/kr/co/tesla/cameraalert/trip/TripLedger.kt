@@ -10,7 +10,8 @@ import kotlin.math.round
 data class TripRecord(
     val vin: String, val startedAt: Long, val endedAt: Long,
     val distanceKm: Double, val batteryUsedPercent: Int?, val estimatedKwh: Double?, val kmPerKwh: Double?,
-    val batteryStartPercent: Int?, val batteryEndPercent: Int?, val routeStartedAt: Long? = null
+    val batteryStartPercent: Int?, val batteryEndPercent: Int?, val routeStartedAt: Long? = null,
+    val routeStartedAts: List<Long> = routeStartedAt?.let(::listOf).orEmpty(), val mergedPartCount: Int = 0
 )
 
 /** Small app-private trip ledger. Odometer is the source of truth for trip distance. */
@@ -89,6 +90,72 @@ object TripLedger {
         prefs(context).edit().putString(RECORDS, kept.toString()).apply()
     }
 
+    /** Complete, lossless record data for the app backup format (including merge/split history). */
+    fun backupRecords(context: Context): JSONArray = JSONArray(prefs(context).getString(RECORDS, "[]"))
+
+    /** Adds valid records absent from the device and returns how many were restored. */
+    fun restoreRecords(context: Context, backup: JSONArray): Int {
+        val stored = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        val keys = (0 until stored.length()).mapNotNull { stored.optJSONObject(it) }.map {
+            Triple(it.optString("vin"), it.optLong("startedAt"), it.optLong("endedAt"))
+        }.toMutableSet()
+        var added = 0
+        for (index in 0 until backup.length()) {
+            val item = backup.optJSONObject(index) ?: continue
+            val valid = runCatching { item.getString("vin"); item.getLong("startedAt"); item.getLong("endedAt"); item.getDouble("distanceKm") }.isSuccess
+            val key = Triple(item.optString("vin"), item.optLong("startedAt"), item.optLong("endedAt"))
+            if (valid && keys.add(key)) { stored.put(item); added++ }
+        }
+        val sorted = (0 until stored.length()).mapNotNull { stored.optJSONObject(it) }.sortedByDescending { it.optLong("startedAt") }.take(200)
+        prefs(context).edit().putString(RECORDS, JSONArray(sorted).toString()).apply()
+        return added
+    }
+
+    /** Replaces ordinary records with one aggregate while retaining their exact originals for undo. */
+    fun merge(context: Context, selected: List<TripRecord>): TripRecord? {
+        if (selected.size < 2 || selected.map { Triple(it.vin, it.startedAt, it.endedAt) }.distinct().size != selected.size) return null
+        val keys = selected.map { Triple(it.vin, it.startedAt, it.endedAt) }.toSet()
+        val all = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        val parts = (0 until all.length()).mapNotNull { all.optJSONObject(it) }.filter {
+            Triple(it.optString("vin"), it.optLong("startedAt"), it.optLong("endedAt")) in keys
+        }
+        if (parts.size != selected.size || parts.any { it.has("mergedParts") }) return null
+        val ordered = selected.sortedBy { it.startedAt }
+        if (ordered.any { it.vin != ordered.first().vin }) return null
+        val routes = ordered.flatMap { if (it.routeStartedAts.isNotEmpty()) it.routeStartedAts else it.routeStartedAt?.let(::listOf).orEmpty() }.distinct()
+        val distance = round(ordered.sumOf { it.distanceKm } * 10) / 10.0
+        val energy = ordered.mapNotNull { it.estimatedKwh }.takeIf { it.size == ordered.size }?.sum()?.let { round(it * 10) / 10.0 }
+        val merged = TripRecord(ordered.first().vin, ordered.first().startedAt, ordered.last().endedAt, distance,
+            ordered.mapNotNull { it.batteryUsedPercent }.takeIf { it.size == ordered.size }?.sum(), energy,
+            energy?.takeIf { it > 0 }?.let { round(distance / it * 10) / 10.0 }, ordered.first().batteryStartPercent,
+            ordered.last().batteryEndPercent, routes.firstOrNull(), routes, ordered.size)
+        val kept = JSONArray()
+        (0 until all.length()).mapNotNull { all.optJSONObject(it) }.filter {
+            Triple(it.optString("vin"), it.optLong("startedAt"), it.optLong("endedAt")) !in keys
+        }.forEach { kept.put(it) }
+        val mergedJson = toJson(merged).apply { put("mergedParts", JSONArray().apply { parts.forEach { put(it) } }) }
+        kept.put(mergedJson)
+        while (kept.length() > 200) kept.remove(0)
+        prefs(context).edit().putString(RECORDS, kept.toString()).apply()
+        return merged
+    }
+
+    /** Restores the exact cards that were used to create an aggregate record. */
+    fun split(context: Context, trip: TripRecord): Boolean {
+        if (trip.mergedPartCount < 2) return false
+        val all = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        val target = (0 until all.length()).mapNotNull { all.optJSONObject(it) }.firstOrNull {
+            it.optString("vin") == trip.vin && it.optLong("startedAt") == trip.startedAt && it.optLong("endedAt") == trip.endedAt && it.has("mergedParts")
+        } ?: return false
+        val parts = target.optJSONArray("mergedParts") ?: return false
+        val kept = JSONArray()
+        (0 until all.length()).mapNotNull { all.optJSONObject(it) }.filter { it !== target }.forEach { kept.put(it) }
+        for (index in 0 until parts.length()) parts.optJSONObject(index)?.let { kept.put(it) }
+        while (kept.length() > 200) kept.remove(0)
+        prefs(context).edit().putString(RECORDS, kept.toString()).apply()
+        return true
+    }
+
     fun active(context: Context): JSONObject? = prefs(context).getString(ACTIVE, null)?.let(::JSONObject)
     fun records(context: Context, vin: String): List<TripRecord> {
         val values = JSONArray(prefs(context).getString(RECORDS, "[]"))
@@ -98,7 +165,7 @@ object TripLedger {
             TripRecord(value.getString("vin"), value.getLong("startedAt"), value.getLong("endedAt"),
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
-                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value))
+                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value))
         }.sortedByDescending { it.startedAt }
     }
 
@@ -150,7 +217,7 @@ object TripLedger {
             runCatching { TripRecord(value.getString("vin"), value.getLong("startedAt"), value.getLong("endedAt"),
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
-                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value)) }.getOrNull()
+                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value)) }.getOrNull()
         }
     }
     private fun append(context: Context, record: TripRecord) {
@@ -165,6 +232,7 @@ object TripLedger {
         put("estimatedKwh", record.estimatedKwh); put("kmPerKwh", record.kmPerKwh)
         put("batteryStartPercent", record.batteryStartPercent); put("batteryEndPercent", record.batteryEndPercent)
         put("routeStartedAt", record.routeStartedAt)
+        put("routeStartedAts", JSONArray(record.routeStartedAts)); put("mergedPartCount", record.mergedPartCount)
     }
     private fun saveAll(context: Context, values: List<TripRecord>) {
         val json = JSONArray()
@@ -219,5 +287,9 @@ object TripLedger {
         if (value.isNull("batteryEndPercent")) null else value.getInt("batteryEndPercent")
     private fun routeStartedAt(value: JSONObject): Long? =
         if (value.isNull("routeStartedAt")) null else value.getLong("routeStartedAt")
+    private fun routeStartedAts(value: JSONObject): List<Long> = value.optJSONArray("routeStartedAts")?.let { array ->
+        (0 until array.length()).mapNotNull { index -> array.optLong(index, Long.MIN_VALUE).takeIf { it != Long.MIN_VALUE } }
+    } ?: routeStartedAt(value)?.let(::listOf).orEmpty()
+    private fun mergedPartCount(value: JSONObject): Int = value.optInt("mergedPartCount", 0)
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

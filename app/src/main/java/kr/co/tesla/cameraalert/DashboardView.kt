@@ -63,6 +63,8 @@ class DashboardView(context: Context, savedTeslaName: String,
     private val guidePage = column()
     private val tripPage = column()
     private val tabButtons = mutableMapOf<String, View>()
+    private val selectedTripKeys = mutableSetOf<String>()
+    private fun tripKey(trip: kr.co.tesla.cameraalert.trip.TripRecord) = "${trip.vin}:${trip.startedAt}:${trip.endedAt}"
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun shape(color: Int, radius: Int = 22, outline: Boolean = false) = GradientDrawable().apply {
         setColor(color); cornerRadius = dp(radius).toFloat()
@@ -407,8 +409,8 @@ class DashboardView(context: Context, savedTeslaName: String,
             addView(controls)
             space(8)
             val backup = row()
-            backup.addView(action("CSV 백업", false, onExportTrips), LinearLayout.LayoutParams(0, -2, 1f))
-            backup.addView(action("CSV 복원", false, onImportTrips), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
+            backup.addView(action("운행 데이터 백업", false, onExportTrips), LinearLayout.LayoutParams(0, -2, 1f))
+            backup.addView(action("운행 데이터 복원", false, onImportTrips), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
             addView(backup)
             space(8)
             addView(action("Google Sheets 로그인 · 자동 기록", false, onConfigureSheets), LinearLayout.LayoutParams(-1, -2))
@@ -418,6 +420,7 @@ class DashboardView(context: Context, savedTeslaName: String,
             addView(action("예시 경로 카드 추가", false) { addSampleRouteTrip() }, LinearLayout.LayoutParams(-1, -2))
         }
         val records = TripLedger.records(context, vinValue)
+        selectedTripKeys.retainAll(records.map(::tripKey).toSet())
         val distance = records.sumOf { it.distanceKm }
         val energy = records.mapNotNull { it.estimatedKwh }.sum()
         val minutes = records.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
@@ -438,6 +441,45 @@ class DashboardView(context: Context, savedTeslaName: String,
             addView(text("${records.size}회 운행", 13f, muted, true))
         }
         tripPage.addView(text("운행 기록", 18f, ink, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        val selected = records.filter { tripKey(it) in selectedTripKeys }
+        if (selected.isNotEmpty()) {
+            card(tripPage).apply {
+                addView(text("${selected.size}개 운행 선택됨", 14f, accent, true))
+                space(8)
+                addView(action(if (selected.size >= 2) "선택한 ${selected.size}개 운행 합치기" else "합치려면 2개 이상 선택하세요", selected.size >= 2) {
+                    if (selected.size < 2) {
+                        Toast.makeText(context, "운행기록을 2개 이상 선택해 주세요.", Toast.LENGTH_SHORT).show()
+                        return@action
+                    }
+                    AlertDialog.Builder(context)
+                        .setTitle("운행기록 합치기")
+                        .setMessage("선택한 카드를 하나로 합칩니다. GPS 경로는 휴식 구간을 잇지 않은 별도 구간으로 보관하며, 나중에 분리하여 원래 카드로 되돌릴 수 있습니다.")
+                        .setNegativeButton("취소", null)
+                        .setPositiveButton("합치기") { _, _ ->
+                            if (TripLedger.merge(context, selected) == null) Toast.makeText(context, "일반 운행기록만 합칠 수 있습니다.", Toast.LENGTH_SHORT).show()
+                            selectedTripKeys.clear(); renderTripLog()
+                        }.show()
+                }, LinearLayout.LayoutParams(-1, -2))
+                space(8)
+                addView(action("선택 해제", false) { selectedTripKeys.clear(); renderTripLog() }, LinearLayout.LayoutParams(-1, -2))
+                space(8)
+                addView(action("선택한 ${selected.size}개 운행 삭제", false) {
+                    AlertDialog.Builder(context)
+                        .setTitle("선택한 운행기록 삭제")
+                        .setMessage("선택한 ${selected.size}개 운행기록과 연결된 GPS 경로를 삭제할까요? 이 작업은 되돌릴 수 없습니다.")
+                        .setNegativeButton("취소", null)
+                        .setPositiveButton("삭제") { _, _ ->
+                            selected.forEach { trip ->
+                                TripLedger.delete(context, trip.vin, trip.startedAt, trip.endedAt)
+                                val routeIds = if (trip.routeStartedAts.isNotEmpty()) trip.routeStartedAts
+                                    else (trip.routeStartedAt ?: RouteLedger.matchingStart(context, trip.startedAt, trip.endedAt))?.let(::listOf).orEmpty()
+                                routeIds.forEach { RouteLedger.delete(context, it) }
+                            }
+                            selectedTripKeys.clear(); renderTripLog()
+                        }.show()
+                }, LinearLayout.LayoutParams(-1, -2))
+            }
+        }
         if (records.isEmpty()) {
             tripPage.addView(text("저장된 운행이 없습니다. 자동 기록을 켠 뒤 주행해 보세요.", 14f, muted))
         }
@@ -445,6 +487,14 @@ class DashboardView(context: Context, savedTeslaName: String,
             val routeStartedAt = trip.routeStartedAt ?: RouteLedger.matchingStart(context, trip.startedAt, trip.endedAt)
             card(tripPage).apply {
                 val header = row()
+                header.addView(CheckBox(context).apply {
+                    isChecked = tripKey(trip) in selectedTripKeys
+                    contentDescription = "운행기록 선택"
+                    setOnCheckedChangeListener { _, checked ->
+                        if (checked) selectedTripKeys.add(tripKey(trip)) else selectedTripKeys.remove(tripKey(trip))
+                        renderTripLog()
+                    }
+                }, LinearLayout.LayoutParams(dp(42), dp(42)))
                 header.addView(text(tripTime(trip.startedAt), 13f, accent, true), LinearLayout.LayoutParams(0, -2, 1f))
                 header.addView(TextView(context).apply {
                     text = "×"; textSize = 24f; gravity = Gravity.CENTER; setTextColor(muted)
@@ -475,11 +525,25 @@ class DashboardView(context: Context, savedTeslaName: String,
                 addView(second)
                 space(10)
                 addView(text(tripBattery(trip), 14f, muted, true))
-                routeStartedAt?.let { routeStartedAt ->
+                if (trip.mergedPartCount >= 2) {
+                    space(8)
+                    addView(text("${trip.mergedPartCount}개 구간을 합친 기록 · 분리하면 원래 카드와 경로로 복원됩니다.", 12f, muted))
+                    space(8)
+                    addView(action("합친 운행 분리", false) {
+                        AlertDialog.Builder(context)
+                            .setTitle("합친 운행 분리")
+                            .setMessage("합치기 전의 카드와 GPS 경로 연결 상태로 되돌립니다.")
+                            .setNegativeButton("취소", null)
+                            .setPositiveButton("분리") { _, _ -> TripLedger.split(context, trip); renderTripLog() }.show()
+                    }, LinearLayout.LayoutParams(-1, -2))
+                }
+                val routeStarts = if (trip.routeStartedAts.isNotEmpty()) trip.routeStartedAts else routeStartedAt?.let(::listOf).orEmpty()
+                if (routeStarts.isNotEmpty()) {
                     space(10)
                     addView(action("경로 보기", false) {
                         context.startActivity(Intent(context, RouteMapActivity::class.java)
-                            .putExtra(RouteMapActivity.EXTRA_STARTED_AT, routeStartedAt))
+                            .putExtra(RouteMapActivity.EXTRA_STARTED_AT, routeStarts.first())
+                            .putExtra(RouteMapActivity.EXTRA_STARTED_ATS, routeStarts.toLongArray()))
                     }, LinearLayout.LayoutParams(-1, -2))
                 }
             }

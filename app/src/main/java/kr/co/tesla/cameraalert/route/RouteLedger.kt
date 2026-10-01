@@ -105,6 +105,25 @@ object RouteLedger {
         prefs(context).edit().putString(RECORDS, kept.toString()).apply()
     }
 
+    /** Complete GPS point data for the app backup format. */
+    fun backupRecords(context: Context): JSONArray = JSONArray(prefs(context).getString(RECORDS, "[]"))
+
+    /** Adds routes absent from the device and returns how many were restored. */
+    fun restoreRecords(context: Context, backup: JSONArray): Int {
+        val stored = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        val ids = (0 until stored.length()).mapNotNull { stored.optJSONObject(it)?.optLong("startedAt") }.toMutableSet()
+        var added = 0
+        for (index in 0 until backup.length()) {
+            val item = backup.optJSONObject(index) ?: continue
+            val valid = runCatching { fromJson(item) }.getOrNull() != null
+            val id = item.optLong("startedAt", Long.MIN_VALUE)
+            if (valid && id != Long.MIN_VALUE && ids.add(id)) { stored.put(item); added++ }
+        }
+        val sorted = (0 until stored.length()).mapNotNull { stored.optJSONObject(it) }.sortedByDescending { it.optLong("startedAt") }.take(MAX_RECORDS)
+        prefs(context).edit().putString(RECORDS, JSONArray(sorted).toString()).apply()
+        return added
+    }
+
     private fun active(context: Context): JSONObject? = prefs(context).getString(ACTIVE, null)?.let { runCatching { JSONObject(it) }.getOrNull() }
     private fun saveActive(context: Context, value: JSONObject) = prefs(context).edit().putString(ACTIVE, value.toString()).apply()
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)

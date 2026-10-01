@@ -29,11 +29,13 @@ import kr.co.tesla.cameraalert.model.SafetyAlertSettings
 import kr.co.tesla.cameraalert.model.SafetyAlertType
 import kr.co.tesla.cameraalert.model.OverspeedToneStyle
 import kr.co.tesla.cameraalert.trip.TripLedger
+import kr.co.tesla.cameraalert.trip.TripBackup
 import kr.co.tesla.cameraalert.trip.GoogleSheetsSync
 import kr.co.tesla.cameraalert.trip.SheetsWebhook
 import kr.co.tesla.cameraalert.voice.AlertSpeaker
 import kr.co.tesla.cameraalert.voice.AppSoundPlayer
 import kr.co.tesla.cameraalert.voice.GeminiTts
+import kr.co.tesla.cameraalert.voice.GeminiAudioBackup
 import kotlinx.coroutines.*
 import java.util.Locale
 import kotlin.math.roundToInt
@@ -90,15 +92,16 @@ class MainActivity : AppCompatActivity() {
         else showLocationPermissionGuide(canOpenSettings = true)
     }
     private val notifications = registerForActivityResult(ActivityResultContracts.RequestPermission()) {}
-    private val exportTrips = registerForActivityResult(ActivityResultContracts.CreateDocument("text/csv")) { uri ->
+    private var geminiAudioLibraryRefresh: (() -> Unit)? = null
+    private val exportTrips = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
         uri ?: return@registerForActivityResult
         lifecycleScope.launch(Dispatchers.IO) {
             val result = runCatching {
-                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(TripLedger.toCsv(this@MainActivity)) }
+                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(TripBackup.export(this@MainActivity)) }
                     ?: error("백업 파일을 열 수 없습니다")
             }
             withContext(Dispatchers.Main) {
-                Toast.makeText(this@MainActivity, if (result.isSuccess) "차계부 CSV 백업을 완료했습니다." else "백업 실패: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+                Toast.makeText(this@MainActivity, if (result.isSuccess) "운행 데이터 백업이 완료되었습니다. 운행기록과 GPS 경로가 저장됐습니다." else "백업 실패: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
             }
         }
     }
@@ -106,11 +109,11 @@ class MainActivity : AppCompatActivity() {
         uri ?: return@registerForActivityResult
         lifecycleScope.launch(Dispatchers.IO) {
             val result = runCatching {
-                contentResolver.openInputStream(uri)?.bufferedReader()?.use { TripLedger.importCsv(this@MainActivity, it) }
+                contentResolver.openInputStream(uri)?.bufferedReader()?.use { TripBackup.restore(this@MainActivity, it.readText()) }
                     ?: error("복원 파일을 열 수 없습니다")
             }
             withContext(Dispatchers.Main) {
-                val message = result.fold({ "차계부 ${it}건을 복원했습니다." }, { "복원 실패: ${it.message}" })
+                val message = result.fold({ "운행 데이터 복원 완료 · 운행기록 ${it.trips}개, GPS 경로 ${it.routes}개를 추가했습니다." }, { "복원 실패: ${it.message}" })
                 Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
             }
         }
@@ -139,8 +142,8 @@ class MainActivity : AppCompatActivity() {
             onSpeedCameraAlertSettings = { showSpeedCameraAlertSettings() },
             onPreviewCameraAlert = { previewCameraAlert() }, onMonitoringSettings = { showMonitoringSettings() },
             onCameraList = { startActivity(Intent(this, CameraListActivity::class.java)) },
-            onExportTrips = { exportTrips.launch("tesla-trip-ledger.csv") },
-            onImportTrips = { importTrips.launch(arrayOf("text/csv", "text/comma-separated-values", "application/csv")) },
+            onExportTrips = { exportTrips.launch("woongpilot-driving-backup.json") },
+            onImportTrips = { importTrips.launch(arrayOf("application/json", "text/plain")) },
             onConfigureSheets = { showGoogleSheetsSettings() }, onOpenSheets = { openGoogleSheet() },
             onAppendSampleTrip = { appendSampleTripRow() },
             onOpenRouteLog = { startActivity(Intent(this, RouteLogActivity::class.java)) })
@@ -478,6 +481,16 @@ class MainActivity : AppCompatActivity() {
             .show()
         fun render() {
             panel.removeAllViews()
+            val backupActions = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL }
+            backupActions.addView(Button(this).apply {
+                text = "음성 캐시 백업"; isAllCaps = false
+                setOnClickListener { exportGeminiAudio.launch("woongpilot-gemini-audio-cache.json") }
+            }, LinearLayout.LayoutParams(0, -2, 1f))
+            backupActions.addView(Button(this).apply {
+                text = "음성 캐시 복원"; isAllCaps = false
+                setOnClickListener { importGeminiAudio.launch(arrayOf("application/json", "text/plain")) }
+            }, LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = padding / 2 })
+            panel.addView(backupActions, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = padding / 2 })
             val clips = geminiSpeaker.cachedAudioItems()
             if (clips.isEmpty()) {
                 panel.addView(TextView(this).apply {
@@ -527,6 +540,8 @@ class MainActivity : AppCompatActivity() {
             geminiSpeaker.clearCachedAudio()
             render()
         }
+        geminiAudioLibraryRefresh = ::render
+        dialog.setOnDismissListener { geminiAudioLibraryRefresh = null }
         render()
     }
 
@@ -547,11 +562,11 @@ class MainActivity : AppCompatActivity() {
                 text = type.label
                 textSize = 16f
                 isChecked = SafetyAlertSettings.isEnabled(this@MainActivity, type)
-                minHeight = (64 * resources.displayMetrics.density).toInt()
-                setPadding(0, padding / 2, 0, padding / 2)
+                minHeight = (52 * resources.displayMetrics.density).toInt()
+                setPadding(0, 0, 0, 0)
             }.also { control ->
-                panel.addView(control, LinearLayout.LayoutParams(-1, (64 * resources.displayMetrics.density).toInt()).apply {
-                    bottomMargin = (10 * resources.displayMetrics.density).toInt()
+                panel.addView(control, LinearLayout.LayoutParams(-1, (52 * resources.displayMetrics.density).toInt()).apply {
+                    bottomMargin = (4 * resources.displayMetrics.density).toInt()
                 })
             }
         }
@@ -750,12 +765,12 @@ class MainActivity : AppCompatActivity() {
             text = "단속 시 플로팅 제한속도 아이콘"
             isChecked = prefs.getBoolean("floating_alert_enabled", false)
         }
-        panel.addView(floating)
+        panel.addView(floating, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = padding / 2 })
         val muted = Switch(this).apply {
             text = "무음 · 감시 중 모든 안내음 끄기"
             isChecked = prefs.getBoolean("monitor_muted", false)
         }
-        panel.addView(muted)
+        panel.addView(muted, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = padding / 3 })
         panel.addView(TextView(this).apply {
             text = "다른 앱 위에 표시 권한이 있어야 하며, 단속 경고 중에만 제한속도와 거리를 띄웁니다."
             setPadding(0, 0, 0, padding / 2)
@@ -861,7 +876,6 @@ class MainActivity : AppCompatActivity() {
         val dialog = androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("Google Sheets 자동 기록")
             .setView(panel)
-            .setNeutralButton("샘플 운행 추가", null)
             .setNegativeButton("취소", null)
             .setPositiveButton("Google 로그인 · 연결") { _, _ ->
                 if (!active.isChecked) {
@@ -879,17 +893,6 @@ class MainActivity : AppCompatActivity() {
                     .requestEmail().requestScopes(Scope(GoogleSheetsSync.SCOPE)).build()
                 googleSheetsLogin.launch(GoogleSignIn.getClient(this, options).signInIntent)
             }.create()
-        dialog.setOnShowListener {
-            dialog.getButton(androidx.appcompat.app.AlertDialog.BUTTON_NEUTRAL).setOnClickListener {
-                lifecycleScope.launch {
-                    val written = GoogleSheetsSync.appendTestRow(this@MainActivity)
-                    Toast.makeText(this@MainActivity,
-                        if (written) "샘플 운행을 Google Sheets에 추가했습니다. TEST-WOONGPILOT 행을 확인해 주세요."
-                        else "샘플 운행 추가에 실패했습니다. Google 로그인과 시트 편집 권한을 확인해 주세요.",
-                        Toast.LENGTH_LONG).show()
-                }
-            }
-        }
         dialog.show()
     }
 
@@ -1063,6 +1066,32 @@ class MainActivity : AppCompatActivity() {
     }.toTypedArray()
     private fun hasLocationPermission() = requiredPermissions().all {
         ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED
+    }
+    private val exportGeminiAudio = registerForActivityResult(ActivityResultContracts.CreateDocument("application/json")) { uri ->
+        uri ?: return@registerForActivityResult
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                contentResolver.openOutputStream(uri)?.bufferedWriter()?.use { it.write(GeminiAudioBackup.export(this@MainActivity)) }
+                    ?: error("백업 파일을 열 수 없습니다")
+            }
+            withContext(Dispatchers.Main) {
+                Toast.makeText(this@MainActivity, if (result.isSuccess) "Gemini 음성 캐시 백업이 완료되었습니다." else "음성 캐시 백업 실패: ${result.exceptionOrNull()?.message}", Toast.LENGTH_LONG).show()
+            }
+        }
+    }
+    private val importGeminiAudio = registerForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        uri ?: return@registerForActivityResult
+        lifecycleScope.launch(Dispatchers.IO) {
+            val result = runCatching {
+                contentResolver.openInputStream(uri)?.bufferedReader()?.use { GeminiAudioBackup.restore(this@MainActivity, it.readText()) }
+                    ?: error("복원 파일을 열 수 없습니다")
+            }
+            withContext(Dispatchers.Main) {
+                val message = result.fold({ "Gemini 음성 캐시 ${it}개를 복원했습니다." }, { "음성 캐시 복원 실패: ${it.message}" })
+                Toast.makeText(this@MainActivity, message, Toast.LENGTH_LONG).show()
+                geminiAudioLibraryRefresh?.invoke()
+            }
+        }
     }
     private fun isGpsEnabled() = getSystemService(LocationManager::class.java)
         .isProviderEnabled(LocationManager.GPS_PROVIDER)
