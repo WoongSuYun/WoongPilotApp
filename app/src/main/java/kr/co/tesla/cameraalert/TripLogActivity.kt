@@ -81,9 +81,11 @@ class TripLogActivity : AppCompatActivity() {
         val vin = prefs.getString("vin", "").orEmpty()
         val records = TripLedger.records(this, vin)
         val totalDistance = records.sumOf { it.distanceKm }
-        val totalKwh = records.mapNotNull { it.estimatedKwh }.sum()
+        val efficiencyRecords = records.filter { (it.estimatedKwh ?: 0.0) > 0.0 && (it.efficiencyDistanceKm ?: 0.0) > 0.0 }
+        val totalKwh = efficiencyRecords.sumOf { it.estimatedKwh ?: 0.0 }
+        val efficiencyDistance = efficiencyRecords.sumOf { it.efficiencyDistanceKm ?: 0.0 }
         val totalMinutes = records.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
-        val efficiency = if (totalKwh > 0) totalDistance / totalKwh else null
+        val efficiency = if (totalKwh > 0) efficiencyDistance / totalKwh else null
         val batteryUsed = records.mapNotNull { it.batteryUsedPercent }.sum()
         card().apply {
             addView(label("누적 운행", 13f, Color.rgb(114, 235, 198)))

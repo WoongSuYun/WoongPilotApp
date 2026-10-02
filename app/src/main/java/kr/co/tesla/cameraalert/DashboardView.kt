@@ -422,9 +422,12 @@ class DashboardView(context: Context, savedTeslaName: String,
         val records = TripLedger.records(context, vinValue)
         selectedTripKeys.retainAll(records.map(::tripKey).toSet())
         val distance = records.sumOf { it.distanceKm }
-        val energy = records.mapNotNull { it.estimatedKwh }.sum()
+        val efficiencyRecords = records.filter { (it.estimatedKwh ?: 0.0) > 0.0 && (it.efficiencyDistanceKm ?: 0.0) > 0.0 }
+        val energy = efficiencyRecords.sumOf { it.estimatedKwh ?: 0.0 }
+        val efficiencyDistance = efficiencyRecords.sumOf { it.efficiencyDistanceKm ?: 0.0 }
+        val zeroEnergyCount = records.count { it.estimatedKwh == 0.0 }
         val minutes = records.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
-        val efficiency = if (energy > 0) distance / energy else null
+        val efficiency = if (energy > 0) efficiencyDistance / energy else null
         card(tripPage).apply {
             addView(text("누적 운행", 13f, accent, true))
             space(10)
@@ -439,6 +442,7 @@ class DashboardView(context: Context, savedTeslaName: String,
             addView(second)
             space(10)
             addView(text("${records.size}회 운행", 13f, muted, true))
+            if (zeroEnergyCount > 0) addView(text("0 kWh 단거리 ${zeroEnergyCount}건은 전비 계산에서 제외", 12f, muted))
         }
         tripPage.addView(text("운행 기록", 18f, ink, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         val selected = records.filter { tripKey(it) in selectedTripKeys }
@@ -537,7 +541,7 @@ class DashboardView(context: Context, savedTeslaName: String,
                             .setPositiveButton("분리") { _, _ -> TripLedger.split(context, trip); renderTripLog() }.show()
                     }, LinearLayout.LayoutParams(-1, -2))
                 }
-                val routeStarts = if (trip.routeStartedAts.isNotEmpty()) trip.routeStartedAts else routeStartedAt?.let(::listOf).orEmpty()
+                val routeStarts = TripLedger.routeIdsForMap(context, trip)
                 if (routeStarts.isNotEmpty()) {
                     space(10)
                     addView(action("경로 보기", false) {

@@ -3,6 +3,7 @@ package kr.co.tesla.cameraalert.trip
 import android.content.Context
 import org.json.JSONArray
 import org.json.JSONObject
+import kr.co.tesla.cameraalert.route.RouteLedger
 import kr.co.tesla.cameraalert.route.RouteRecord
 import java.io.BufferedReader
 import kotlin.math.round
@@ -11,7 +12,9 @@ data class TripRecord(
     val vin: String, val startedAt: Long, val endedAt: Long,
     val distanceKm: Double, val batteryUsedPercent: Int?, val estimatedKwh: Double?, val kmPerKwh: Double?,
     val batteryStartPercent: Int?, val batteryEndPercent: Int?, val routeStartedAt: Long? = null,
-    val routeStartedAts: List<Long> = routeStartedAt?.let(::listOf).orEmpty(), val mergedPartCount: Int = 0
+    val routeStartedAts: List<Long> = routeStartedAt?.let(::listOf).orEmpty(), val mergedPartCount: Int = 0,
+    /** Distance whose battery use was measurable; this may exclude 0 kWh short trips. */
+    val efficiencyDistanceKm: Double? = null
 )
 
 /** Small app-private trip ledger. Odometer is the source of truth for trip distance. */
@@ -119,16 +122,32 @@ object TripLedger {
         val parts = (0 until all.length()).mapNotNull { all.optJSONObject(it) }.filter {
             Triple(it.optString("vin"), it.optLong("startedAt"), it.optLong("endedAt")) in keys
         }
-        if (parts.size != selected.size || parts.any { it.has("mergedParts") }) return null
+        // A merged card retains its original JSON in mergedParts, so it can safely be merged
+        // again with another card.  Splitting the outer card restores that prior merge intact.
+        if (parts.size != selected.size) return null
         val ordered = selected.sortedBy { it.startedAt }
         if (ordered.any { it.vin != ordered.first().vin }) return null
-        val routes = ordered.flatMap { if (it.routeStartedAts.isNotEmpty()) it.routeStartedAts else it.routeStartedAt?.let(::listOf).orEmpty() }.distinct()
+        val routes = ordered.flatMap { record ->
+            record.routeStartedAts.takeIf { it.isNotEmpty() }
+                ?: record.routeStartedAt?.let(::listOf)
+                ?: RouteLedger.matchingStart(context, record.startedAt, record.endedAt)?.let(::listOf).orEmpty()
+        }.distinct()
         val distance = round(ordered.sumOf { it.distanceKm } * 10) / 10.0
-        val energy = ordered.mapNotNull { it.estimatedKwh }.takeIf { it.size == ordered.size }?.sum()?.let { round(it * 10) / 10.0 }
+        // A card without measured energy (or with 0 kWh from rounded battery telemetry) must
+        // not erase the usable energy reading from another card in the same merged record.
+        val measuredParts = ordered.filter { (it.estimatedKwh ?: 0.0) > 0.0 }
+        val energy = measuredParts.sumOf { it.estimatedKwh ?: 0.0 }
+            .takeIf { it > 0 }?.let { round(it * 10) / 10.0 }
+        // Battery percentage is whole-number telemetry.  A 0% short trip has no measurable
+        // energy, so including its distance would artificially improve the merged efficiency.
+        val efficiencyDistance = measuredParts
+            .sumOf { it.efficiencyDistanceKm ?: it.distanceKm }
         val merged = TripRecord(ordered.first().vin, ordered.first().startedAt, ordered.last().endedAt, distance,
             ordered.mapNotNull { it.batteryUsedPercent }.takeIf { it.size == ordered.size }?.sum(), energy,
-            energy?.takeIf { it > 0 }?.let { round(distance / it * 10) / 10.0 }, ordered.first().batteryStartPercent,
-            ordered.last().batteryEndPercent, routes.firstOrNull(), routes, ordered.size)
+            energy?.takeIf { it > 0 && efficiencyDistance > 0 }?.let { round(efficiencyDistance / it * 10) / 10.0 }, ordered.first().batteryStartPercent,
+            ordered.last().batteryEndPercent, routes.firstOrNull(), routes,
+            ordered.sumOf { if (it.mergedPartCount >= 2) it.mergedPartCount else 1 },
+            efficiencyDistance.takeIf { it > 0 })
         val kept = JSONArray()
         (0 until all.length()).mapNotNull { all.optJSONObject(it) }.filter {
             Triple(it.optString("vin"), it.optLong("startedAt"), it.optLong("endedAt")) !in keys
@@ -157,6 +176,27 @@ object TripLedger {
     }
 
     fun active(context: Context): JSONObject? = prefs(context).getString(ACTIVE, null)?.let(::JSONObject)
+
+    /**
+     * Resolves every route belonging to a card.  Older trip cards did not persist the route ID;
+     * for those, use the same time-window match that the individual-card screen uses.
+     */
+    fun routeIdsForMap(context: Context, trip: TripRecord): List<Long> {
+        val all = JSONArray(prefs(context).getString(RECORDS, "[]"))
+        val stored = (0 until all.length()).mapNotNull(all::optJSONObject).firstOrNull {
+            it.optString("vin") == trip.vin && it.optLong("startedAt") == trip.startedAt && it.optLong("endedAt") == trip.endedAt
+        }
+        val parts = stored?.optJSONArray("mergedParts")
+        val sources = if (parts != null) (0 until parts.length()).mapNotNull(parts::optJSONObject)
+        else listOfNotNull(stored)
+        if (sources.isEmpty()) return trip.routeStartedAts.ifEmpty { trip.routeStartedAt?.let(::listOf).orEmpty() }
+        return sources.sortedBy { it.optLong("startedAt") }.flatMap { value ->
+            routeStartedAts(value).takeIf { it.isNotEmpty() }
+                ?: routeStartedAt(value)?.let(::listOf)
+                ?: RouteLedger.matchingStart(context, value.optLong("startedAt"), value.optLong("endedAt"))?.let(::listOf).orEmpty()
+        }.distinct()
+    }
+
     fun records(context: Context, vin: String): List<TripRecord> {
         val values = JSONArray(prefs(context).getString(RECORDS, "[]"))
         return (0 until values.length()).mapNotNull { index ->
@@ -164,8 +204,9 @@ object TripLedger {
             if (value.optString("vin") != vin) return@mapNotNull null
             TripRecord(value.getString("vin"), value.getLong("startedAt"), value.getLong("endedAt"),
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
-                if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
-                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value))
+                estimatedKwh(value), efficiencyKmPerKwh(value),
+                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value),
+                efficiencyDistanceKm(value))
         }.sortedByDescending { it.startedAt }
     }
 
@@ -176,9 +217,12 @@ object TripLedger {
         val recalculated = allRecords(context).map { record ->
             if (record.vin != vin || record.batteryUsedPercent == null) return@map record
             val kwh = round(capacityKwh * record.batteryUsedPercent) / 100.0
-            val efficiency = kwh.takeIf { it > 0 }?.let { round(record.distanceKm / it * 10) / 10.0 }
+            val efficiencyDistance = record.efficiencyDistanceKm ?: kwh.takeIf { it > 0 }?.let { record.distanceKm }
+            val efficiency = efficiencyDistance?.takeIf { it > 0 }?.let { distance ->
+                kwh.takeIf { it > 0 }?.let { round(distance / it * 10) / 10.0 }
+            }
             changed++
-            record.copy(estimatedKwh = kwh, kmPerKwh = efficiency)
+            record.copy(estimatedKwh = kwh, kmPerKwh = efficiency, efficiencyDistanceKm = efficiencyDistance)
         }
         if (changed > 0) saveAll(context, recalculated)
         return changed
@@ -216,8 +260,9 @@ object TripLedger {
             val value = values.optJSONObject(index) ?: return@mapNotNull null
             runCatching { TripRecord(value.getString("vin"), value.getLong("startedAt"), value.getLong("endedAt"),
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
-                if (value.isNull("estimatedKwh")) null else value.getDouble("estimatedKwh"), efficiencyKmPerKwh(value),
-                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value)) }.getOrNull()
+                estimatedKwh(value), efficiencyKmPerKwh(value),
+                batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value),
+                efficiencyDistanceKm(value)) }.getOrNull()
         }
     }
     private fun append(context: Context, record: TripRecord) {
@@ -233,6 +278,7 @@ object TripLedger {
         put("batteryStartPercent", record.batteryStartPercent); put("batteryEndPercent", record.batteryEndPercent)
         put("routeStartedAt", record.routeStartedAt)
         put("routeStartedAts", JSONArray(record.routeStartedAts)); put("mergedPartCount", record.mergedPartCount)
+        put("efficiencyDistanceKm", record.efficiencyDistanceKm)
     }
     private fun saveAll(context: Context, values: List<TripRecord>) {
         val json = JSONArray()
@@ -275,11 +321,24 @@ object TripLedger {
             else -> BatteryCapacity(75.0, "기본값")
         }
     }
+    private fun estimatedKwh(value: JSONObject): Double? {
+        if (!value.isNull("estimatedKwh")) return value.getDouble("estimatedKwh")
+        // Older merged cards could lose their aggregate if one source card had no measurement.
+        // Their originals are retained, so recover the positive measurements from those parts.
+        val parts = value.optJSONArray("mergedParts") ?: return null
+        return (0 until parts.length()).mapNotNull(parts::optJSONObject).sumOf { estimatedKwh(it) ?: 0.0 }
+            .takeIf { it > 0 }
+    }
+
     /** Reads pre-update records that stored the inverse Wh/km efficiency. */
     private fun efficiencyKmPerKwh(value: JSONObject): Double? = when {
         !value.isNull("kmPerKwh") -> value.getDouble("kmPerKwh")
         !value.isNull("whPerKm") -> value.getInt("whPerKm").takeIf { it > 0 }?.let { round(1000.0 / it * 10) / 10.0 }
-        else -> null
+        else -> estimatedKwh(value)?.takeIf { it > 0 }?.let { energy ->
+            efficiencyDistanceKm(value)?.takeIf { it > 0 }?.let { distance ->
+                round(distance / energy * 10) / 10.0
+            }
+        }
     }
     private fun batteryStartPercent(value: JSONObject): Int? =
         if (value.isNull("batteryStartPercent")) null else value.getInt("batteryStartPercent")
@@ -289,7 +348,17 @@ object TripLedger {
         if (value.isNull("routeStartedAt")) null else value.getLong("routeStartedAt")
     private fun routeStartedAts(value: JSONObject): List<Long> = value.optJSONArray("routeStartedAts")?.let { array ->
         (0 until array.length()).mapNotNull { index -> array.optLong(index, Long.MIN_VALUE).takeIf { it != Long.MIN_VALUE } }
-    } ?: routeStartedAt(value)?.let(::listOf).orEmpty()
+    }?.takeIf { it.isNotEmpty() } ?: routeStartedAt(value)?.let(::listOf).orEmpty()
     private fun mergedPartCount(value: JSONObject): Int = value.optInt("mergedPartCount", 0)
+    private fun efficiencyDistanceKm(value: JSONObject): Double? {
+        if (!value.isNull("efficiencyDistanceKm")) return value.optDouble("efficiencyDistanceKm").takeIf { it > 0 }
+        // Repair the calculation for merged cards created before efficiencyDistanceKm existed.
+        val parts = value.optJSONArray("mergedParts") ?: return value.optDouble("estimatedKwh").takeIf { it > 0 }
+            ?.let { value.optDouble("distanceKm") }
+        val distance = (0 until parts.length()).mapNotNull(parts::optJSONObject).sumOf { part ->
+            efficiencyDistanceKm(part) ?: 0.0
+        }
+        return distance.takeIf { it > 0 }
+    }
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
 }

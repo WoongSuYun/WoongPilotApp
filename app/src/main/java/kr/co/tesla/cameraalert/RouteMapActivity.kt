@@ -25,7 +25,10 @@ class RouteMapActivity : AppCompatActivity() {
         super.onCreate(savedInstanceState)
         val routeIds = intent.getLongArrayExtra(EXTRA_STARTED_ATS)?.toList()
             ?: listOf(intent.getLongExtra(EXTRA_STARTED_AT, -1L))
-        val routes = RouteLedger.records(this).filter { it.startedAt in routeIds }
+        // Keep the merged card's chronological route order.  RouteLedger itself is displayed
+        // newest-first, which would otherwise make the colour assignment appear arbitrary.
+        val routesByStart = RouteLedger.records(this).associateBy { it.startedAt }
+        val routes = routeIds.distinct().mapNotNull(routesByStart::get)
         if (routes.isEmpty()) { finish(); return }
         title = "주행 경로 지도"
         KakaoMapSdk.init(this, BuildConfig.KAKAO_NATIVE_APP_KEY)
@@ -44,17 +47,22 @@ class RouteMapActivity : AppCompatActivity() {
                     Color.rgb(156, 91, 204), // purple
                     Color.rgb(224, 82, 99)   // red
                 )
-                routes.forEachIndexed { index, route ->
+                // A RouteLineSegment refers to a style by its index in this one shared set.
+                val styles = RouteLineStylesSet.from(*routeColors.map { color ->
+                    RouteLineStyles.from(RouteLineStyle.from(14f, color, 3f, Color.WHITE))
+                }.toTypedArray())
+                // RouteLineOptions without an explicit ID replaces the previous line on the
+                // default layer.  Put every merged-card route into one RouteLine as segments.
+                val segments = routes.mapIndexedNotNull { index, route ->
                     val routePoints = route.points.map { LatLng.from(it.latitude, it.longitude) }
-                    if (routePoints.size >= 2) {
-                        val styles = RouteLineStylesSet.from(
-                            RouteLineStyles.from(RouteLineStyle.from(14f, routeColors[index % routeColors.size], 3f, Color.WHITE))
-                        )
-                        val segment = RouteLineSegment.from(routePoints).setStyles(styles.getStyles(0))
-                        kakaoMap.routeLineManager?.layer?.addRouteLine(
-                            RouteLineOptions.from(segment).setStylesSet(styles)
-                        )
+                    routePoints.takeIf { it.size >= 2 }?.let {
+                        RouteLineSegment.from(it).setStyles(styles.getStyles(index % routeColors.size))
                     }
+                }
+                if (segments.isNotEmpty()) {
+                    kakaoMap.routeLineManager?.layer?.addRouteLine(
+                        RouteLineOptions.from(segments).setStylesSet(styles)
+                    )
                 }
                 kakaoMap.moveCamera(CameraUpdateFactory.fitMapPoints(points.toTypedArray(), 72))
             }
