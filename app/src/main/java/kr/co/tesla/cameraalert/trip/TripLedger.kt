@@ -14,7 +14,8 @@ data class TripRecord(
     val batteryStartPercent: Int?, val batteryEndPercent: Int?, val routeStartedAt: Long? = null,
     val routeStartedAts: List<Long> = routeStartedAt?.let(::listOf).orEmpty(), val mergedPartCount: Int = 0,
     /** Distance whose battery use was measurable; this may exclude 0 kWh short trips. */
-    val efficiencyDistanceKm: Double? = null
+    val efficiencyDistanceKm: Double? = null,
+    val countsTowardLifetime: Boolean = true
 )
 
 /** Small app-private trip ledger. Odometer is the source of truth for trip distance. */
@@ -22,6 +23,10 @@ object TripLedger {
     private const val PREFS = "trip_ledger"
     private const val RECORDS = "records"
     private const val ACTIVE = "active"
+    private const val LIFETIME_PREFS = "trip_lifetime"
+    private const val LIFETIME_INITIALIZED = "initialized"
+    private const val LIFETIME_DISTANCE_KM = "distance_km"
+    private const val LIFETIME_TRIP_COUNT = "trip_count"
 
     data class BatteryCapacity(val kwh: Double, val source: String)
 
@@ -59,26 +64,36 @@ object TripLedger {
         val kmPerKwh = kwh?.takeIf { it > 0 }?.let { round(distance / it * 10) / 10.0 }
         val record = TripRecord(start.getString("vin"), start.getLong("startedAt"), now, distance, batteryUsed, kwh, kmPerKwh,
             start.getInt("batteryPercent"), batteryPercent, routeStartedAt)
-        val records = JSONArray(prefs(context).getString(RECORDS, "[]"))
-        records.put(JSONObject().apply {
-            put("vin", record.vin); put("startedAt", record.startedAt); put("endedAt", record.endedAt)
-            put("distanceKm", record.distanceKm); put("batteryUsedPercent", record.batteryUsedPercent)
-            put("estimatedKwh", record.estimatedKwh); put("kmPerKwh", record.kmPerKwh)
-            put("batteryStartPercent", record.batteryStartPercent); put("batteryEndPercent", record.batteryEndPercent)
-        })
-        while (records.length() > 200) records.remove(0)
-        prefs(context).edit().putString(RECORDS, records.toString()).apply()
+        append(context, record)
         return record
     }
 
     /** Saves a phone-GPS trip when Tesla telemetry is unavailable. Battery values intentionally stay empty. */
-    fun recordGpsTrip(context: Context, vin: String, route: RouteRecord?): TripRecord? {
+    fun recordGpsTrip(context: Context, vin: String, route: RouteRecord?, countsTowardLifetime: Boolean = true): TripRecord? {
         route ?: return null
         prefs(context).edit().remove(ACTIVE).apply()
         val record = TripRecord(vin, route.startedAt, route.endedAt, route.distanceKm,
-            null, null, null, null, null, route.startedAt)
+            null, null, null, null, null, route.startedAt, countsTowardLifetime = countsTowardLifetime)
         append(context, record)
         return record
+    }
+
+    data class LifetimeStats(val distanceKm: Double, val tripCount: Long)
+
+    /** Lifetime distance/count survives pruning of the recent-card list. */
+    fun lifetime(context: Context): LifetimeStats {
+        val store = lifetimePrefs(context)
+        if (!store.getBoolean(LIFETIME_INITIALIZED, false)) {
+            val records = allRecords(context).filter { it.countsTowardLifetime }
+            val initial = LifetimeStats(records.sumOf { it.distanceKm }, records.sumOf {
+                if (it.mergedPartCount >= 2) it.mergedPartCount.toLong() else 1L
+            })
+            store.edit().putBoolean(LIFETIME_INITIALIZED, true)
+                .putFloat(LIFETIME_DISTANCE_KM, initial.distanceKm.toFloat())
+                .putLong(LIFETIME_TRIP_COUNT, initial.tripCount).apply()
+            return initial
+        }
+        return LifetimeStats(store.getFloat(LIFETIME_DISTANCE_KM, 0f).toDouble(), store.getLong(LIFETIME_TRIP_COUNT, 0))
     }
 
     fun delete(context: Context, vin: String, startedAt: Long, endedAt: Long) {
@@ -206,7 +221,7 @@ object TripLedger {
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 estimatedKwh(value), efficiencyKmPerKwh(value),
                 batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value),
-                efficiencyDistanceKm(value))
+                efficiencyDistanceKm(value), countsTowardLifetime(value))
         }.sortedByDescending { it.startedAt }
     }
 
@@ -262,14 +277,21 @@ object TripLedger {
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 estimatedKwh(value), efficiencyKmPerKwh(value),
                 batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value),
-                efficiencyDistanceKm(value)) }.getOrNull()
+                efficiencyDistanceKm(value), countsTowardLifetime(value)) }.getOrNull()
         }
     }
     private fun append(context: Context, record: TripRecord) {
+        // Read/initialize before appending so a first-run migration does not count this record twice.
+        val lifetimeBeforeAppend = record.countsTowardLifetime.takeIf { it }?.let { lifetime(context) }
         val records = JSONArray(prefs(context).getString(RECORDS, "[]"))
         records.put(toJson(record))
         while (records.length() > 200) records.remove(0)
         prefs(context).edit().putString(RECORDS, records.toString()).apply()
+        lifetimeBeforeAppend?.let { current ->
+            lifetimePrefs(context).edit()
+                .putFloat(LIFETIME_DISTANCE_KM, (current.distanceKm + record.distanceKm).toFloat())
+                .putLong(LIFETIME_TRIP_COUNT, current.tripCount + 1).apply()
+        }
     }
     private fun toJson(record: TripRecord) = JSONObject().apply {
         put("vin", record.vin); put("startedAt", record.startedAt); put("endedAt", record.endedAt)
@@ -279,6 +301,7 @@ object TripLedger {
         put("routeStartedAt", record.routeStartedAt)
         put("routeStartedAts", JSONArray(record.routeStartedAts)); put("mergedPartCount", record.mergedPartCount)
         put("efficiencyDistanceKm", record.efficiencyDistanceKm)
+        put("countsTowardLifetime", record.countsTowardLifetime)
     }
     private fun saveAll(context: Context, values: List<TripRecord>) {
         val json = JSONArray()
@@ -350,6 +373,7 @@ object TripLedger {
         (0 until array.length()).mapNotNull { index -> array.optLong(index, Long.MIN_VALUE).takeIf { it != Long.MIN_VALUE } }
     }?.takeIf { it.isNotEmpty() } ?: routeStartedAt(value)?.let(::listOf).orEmpty()
     private fun mergedPartCount(value: JSONObject): Int = value.optInt("mergedPartCount", 0)
+    private fun countsTowardLifetime(value: JSONObject): Boolean = value.optBoolean("countsTowardLifetime", true)
     private fun efficiencyDistanceKm(value: JSONObject): Double? {
         if (!value.isNull("efficiencyDistanceKm")) return value.optDouble("efficiencyDistanceKm").takeIf { it > 0 }
         // Repair the calculation for merged cards created before efficiencyDistanceKm existed.
@@ -361,4 +385,5 @@ object TripLedger {
         return distance.takeIf { it > 0 }
     }
     private fun prefs(context: Context) = context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+    private fun lifetimePrefs(context: Context) = context.getSharedPreferences(LIFETIME_PREFS, Context.MODE_PRIVATE)
 }

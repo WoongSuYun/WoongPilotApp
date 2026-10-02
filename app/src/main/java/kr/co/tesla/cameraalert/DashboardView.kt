@@ -6,12 +6,16 @@ import android.content.res.ColorStateList
 import android.graphics.*
 import android.graphics.drawable.GradientDrawable
 import android.graphics.drawable.RippleDrawable
+import android.text.Editable
 import android.text.InputFilter
 import android.text.InputType
+import android.text.TextWatcher
 import android.view.Gravity
 import android.view.View
 import android.widget.*
 import androidx.appcompat.app.AlertDialog
+import kr.co.tesla.cameraalert.trip.MaintenanceLedger
+import kr.co.tesla.cameraalert.trip.MaintenanceRecord
 import kr.co.tesla.cameraalert.trip.TripLedger
 import kr.co.tesla.cameraalert.route.RouteLedger
 import java.text.SimpleDateFormat
@@ -64,6 +68,9 @@ class DashboardView(context: Context, savedTeslaName: String,
     private val tripPage = column()
     private val tabButtons = mutableMapOf<String, View>()
     private val selectedTripKeys = mutableSetOf<String>()
+    private var tripSelectionPopup: PopupWindow? = null
+    private enum class LedgerPage { DRIVES, MAINTENANCE }
+    private var ledgerPage = LedgerPage.DRIVES
     private fun tripKey(trip: kr.co.tesla.cameraalert.trip.TripRecord) = "${trip.vin}:${trip.startedAt}:${trip.endedAt}"
     private fun dp(n: Int) = (n * resources.displayMetrics.density).toInt()
     private fun shape(color: Int, radius: Int = 22, outline: Boolean = false) = GradientDrawable().apply {
@@ -132,6 +139,7 @@ class DashboardView(context: Context, savedTeslaName: String,
             .setPositiveButton("확인", null).show()
     }
     private fun showTab(name: String) {
+        if (name != "trip") tripSelectionPopup?.dismiss()
         monitorPage.visibility = if (name == "monitor") View.VISIBLE else View.GONE
         vehiclePage.visibility = if (name == "vehicle") View.VISIBLE else View.GONE
         guidePage.visibility = if (name == "guide") View.VISIBLE else View.GONE
@@ -149,6 +157,14 @@ class DashboardView(context: Context, savedTeslaName: String,
         minHeight = dp(54); minimumHeight = dp(54)
         setPadding(dp(12), dp(12), dp(12), dp(12))
         setOnClickListener { click() }
+    }
+    private fun ledgerTab(label: String, page: LedgerPage) = TextView(context).apply {
+        text = label; textSize = 14f; gravity = Gravity.CENTER
+        typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        setTextColor(if (ledgerPage == page) Color.rgb(13, 33, 29) else muted)
+        setPadding(dp(10), dp(12), dp(10), dp(12))
+        background = shape(if (ledgerPage == page) accent else Color.rgb(34, 46, 61), 14)
+        setOnClickListener { ledgerPage = page; renderTripLog() }
     }
     private fun heading(parent: LinearLayout, number: String, title: String, subtitle: String) {
         val line = row()
@@ -342,6 +358,16 @@ class DashboardView(context: Context, savedTeslaName: String,
     }
     private fun renderTripLog() {
         tripPage.removeAllViews()
+        tripPage.addView(row().apply {
+            background = shape(Color.rgb(18, 48, 58), 16); setPadding(dp(4), dp(4), dp(4), dp(4))
+            addView(ledgerTab("운행 기록", LedgerPage.DRIVES), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(ledgerTab("정비 기록", LedgerPage.MAINTENANCE), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(4) })
+        }, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(14) })
+        if (ledgerPage == LedgerPage.MAINTENANCE) {
+            tripSelectionPopup?.dismiss()
+            renderMaintenancePage()
+            return
+        }
         val prefs = context.getSharedPreferences("settings", Context.MODE_PRIVATE)
         val vinValue = prefs.getString("vin", "").orEmpty()
         val active = TripLedger.active(context)
@@ -374,6 +400,9 @@ class DashboardView(context: Context, savedTeslaName: String,
                         renderTripLog()
                     }.show()
             }, LinearLayout.LayoutParams(-2, -2))
+            // Keep the dashboard focused on vehicle/status information; configuration is in one dialog.
+            vehicleHeader.getChildAt(1).visibility = View.GONE
+            vehicleHeader.addView(action("차계부 설정", false) { showTripSettingsDialog(vinValue, capacity, prefs) }, LinearLayout.LayoutParams(-2, -2))
             addView(vehicleHeader)
             addView(text(vehicleLabel.ifBlank { "차량 정보 동기화 대기" }, 18f, ink, true))
             addView(text(capacity?.let { "전비 계산 기준 · ${it.source} · ${"%.1f".format(it.kwh)} kWh" }
@@ -418,15 +447,19 @@ class DashboardView(context: Context, savedTeslaName: String,
             addView(action("연결된 Google Sheets 열기", false, onOpenSheets), LinearLayout.LayoutParams(-1, -2))
             space(8)
             addView(action("예시 경로 카드 추가", false) { addSampleRouteTrip() }, LinearLayout.LayoutParams(-1, -2))
+            for (index in 7 until childCount) getChildAt(index).visibility = View.GONE
         }
         val records = TripLedger.records(context, vinValue)
+        val lifetime = TripLedger.lifetime(context)
         selectedTripKeys.retainAll(records.map(::tripKey).toSet())
-        val distance = records.sumOf { it.distanceKm }
-        val efficiencyRecords = records.filter { (it.estimatedKwh ?: 0.0) > 0.0 && (it.efficiencyDistanceKm ?: 0.0) > 0.0 }
+        val statisticsRecords = records.filter { it.countsTowardLifetime }
+        val sampleCount = records.size - statisticsRecords.size
+        val distance = statisticsRecords.sumOf { it.distanceKm }
+        val efficiencyRecords = statisticsRecords.filter { (it.estimatedKwh ?: 0.0) > 0.0 && (it.efficiencyDistanceKm ?: 0.0) > 0.0 }
         val energy = efficiencyRecords.sumOf { it.estimatedKwh ?: 0.0 }
         val efficiencyDistance = efficiencyRecords.sumOf { it.efficiencyDistanceKm ?: 0.0 }
-        val zeroEnergyCount = records.count { it.estimatedKwh == 0.0 }
-        val minutes = records.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
+        val zeroEnergyCount = statisticsRecords.count { it.estimatedKwh == 0.0 }
+        val minutes = statisticsRecords.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
         val efficiency = if (energy > 0) efficiencyDistance / energy else null
         card(tripPage).apply {
             addView(text("누적 운행", 13f, accent, true))
@@ -441,12 +474,15 @@ class DashboardView(context: Context, savedTeslaName: String,
             second.addView(tripMetric("평균 전비", efficiency?.let { "${"%.1f".format(it)} km/kWh" } ?: "—"), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
             addView(second)
             space(10)
-            addView(text("${records.size}회 운행", 13f, muted, true))
+            addView(text("${statisticsRecords.size}회 운행", 13f, muted, true))
             if (zeroEnergyCount > 0) addView(text("0 kWh 단거리 ${zeroEnergyCount}건은 전비 계산에서 제외", 12f, muted))
+            addView(text("누적 ${"%.1f".format(lifetime.distanceKm)} km · ${lifetime.tripCount}회 운행", 12f, muted))
+            if (sampleCount > 0) addView(text("예시 경로 카드 ${sampleCount}건은 통계에서 제외", 12f, muted))
         }
         tripPage.addView(text("운행 기록", 18f, ink, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
         val selected = records.filter { tripKey(it) in selectedTripKeys }
-        if (selected.isNotEmpty()) {
+        // Selection actions live in the floating bottom bar so they remain available while scrolling.
+        if (false && selected.isNotEmpty()) {
             card(tripPage).apply {
                 addView(text("${selected.size}개 운행 선택됨", 14f, accent, true))
                 space(8)
@@ -552,12 +588,340 @@ class DashboardView(context: Context, savedTeslaName: String,
                 }
             }
         }
+        updateTripSelectionPopup(records)
     }
+    private fun showTripSettingsDialog(
+        vin: String,
+        capacity: TripLedger.BatteryCapacity?,
+        prefs: android.content.SharedPreferences
+    ) {
+        val settings = column().apply { setPadding(dp(20), dp(8), dp(20), dp(8)) }
+        settings.addView(text("운행 기록 설정", 18f, ink, true))
+        settings.addView(text("자동 기록, 전비 계산, 백업과 연동 기능을 관리합니다.", 13f, muted))
+        settings.space(12)
+        settings.addView(action("전비 다시 계산", false) {
+            if (capacity == null || vin.isBlank()) {
+                Toast.makeText(context, "Tesla 차량 정보를 먼저 동기화해 주세요.", Toast.LENGTH_SHORT).show()
+                return@action
+            }
+            AlertDialog.Builder(context)
+                .setTitle("기존 전비 다시 계산")
+                .setMessage("${capacity.source} ${"%.1f".format(capacity.kwh)} kWh 기준으로 기존 운행기록의 전비를 다시 계산합니다.")
+                .setNegativeButton("취소", null)
+                .setPositiveButton("다시 계산") { _, _ ->
+                    val count = TripLedger.recalculateEfficiency(context, vin, capacity.kwh)
+                    Toast.makeText(context, "${count}건의 운행 전비를 다시 계산했습니다.", Toast.LENGTH_LONG).show()
+                    renderTripLog()
+                }.show()
+        }, LinearLayout.LayoutParams(-1, -2))
+        settings.space(8)
+        settings.addView(Switch(context).apply {
+            text = "자동 기록 모드 사용"; textSize = 16f
+            isChecked = prefs.getBoolean("trip_auto_enabled", false)
+            setOnCheckedChangeListener { _, enabled ->
+                prefs.edit().putBoolean("trip_auto_enabled", enabled)
+                    .putString("trip_status", if (enabled) "자동 기록 모드 켜짐" else "자동 기록 모드 꺼짐").apply()
+            }
+        })
+        settings.space(8)
+        val backup = row()
+        backup.addView(action("운행 데이터 백업", false, onExportTrips), LinearLayout.LayoutParams(0, -2, 1f))
+        backup.addView(action("운행 데이터 복원", false, onImportTrips), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
+        settings.addView(backup)
+        settings.space(8)
+        settings.addView(action("Google Sheets 로그인 · 자동 기록", false, onConfigureSheets), LinearLayout.LayoutParams(-1, -2))
+        settings.space(8)
+        settings.addView(action("연결된 Google Sheets 열기", false, onOpenSheets), LinearLayout.LayoutParams(-1, -2))
+        settings.space(8)
+        settings.addView(action("예시 경로 카드 추가", false) { addSampleRouteTrip() }, LinearLayout.LayoutParams(-1, -2))
+        AlertDialog.Builder(context).setTitle("차계부 설정").setView(ScrollView(context).apply { addView(settings) })
+            .setPositiveButton("닫기", null).show()
+    }
+
+    private fun updateTripSelectionPopup(records: List<kr.co.tesla.cameraalert.trip.TripRecord>) {
+        tripSelectionPopup?.dismiss()
+        val selected = records.filter { tripKey(it) in selectedTripKeys }
+        if (selected.isEmpty()) return
+        val panel = row().apply {
+            background = shape(Color.rgb(18, 48, 58), 18, outline = true)
+            setPadding(dp(12), dp(10), dp(12), dp(10))
+            elevation = dp(8).toFloat()
+            addView(text("${selected.size}개 선택", 14f, ink, true), LinearLayout.LayoutParams(0, -2, 1f))
+            addView(action("선택 해제", false) { selectedTripKeys.clear(); renderTripLog() },
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+            addView(action("삭제", false) { confirmTripDelete(selected) },
+                LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+            addView(action(if (selected.size >= 2) "합치기" else "1개 더 선택", true) {
+                if (selected.size >= 2) confirmTripMerge(selected)
+            }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(8) })
+        }
+        tripSelectionPopup = PopupWindow(panel, -1, -2, false).apply {
+            isOutsideTouchable = false; elevation = dp(8).toFloat()
+            setBackgroundDrawable(android.graphics.drawable.ColorDrawable(Color.TRANSPARENT))
+            showAtLocation(rootView, Gravity.BOTTOM, dp(12), dp(16))
+        }
+    }
+
+    private fun confirmTripMerge(selected: List<kr.co.tesla.cameraalert.trip.TripRecord>) {
+        AlertDialog.Builder(context)
+            .setTitle("운행기록 합치기")
+            .setMessage("선택한 카드를 하나로 합칩니다. GPS 경로는 휴식 구간을 잇지 않은 별도 구간으로 보관하며, 나중에 분리하여 원래 카드로 되돌릴 수 있습니다.")
+            .setNegativeButton("취소", null)
+            .setPositiveButton("합치기") { _, _ ->
+                if (TripLedger.merge(context, selected) == null) Toast.makeText(context, "선택한 운행기록을 합칠 수 없습니다.", Toast.LENGTH_SHORT).show()
+                selectedTripKeys.clear()
+                tripSelectionPopup?.dismiss()
+                renderTripLog()
+            }.show()
+    }
+
+    private fun confirmTripDelete(selected: List<kr.co.tesla.cameraalert.trip.TripRecord>) {
+        AlertDialog.Builder(context)
+            .setTitle("선택한 운행 삭제")
+            .setMessage("선택한 ${selected.size}개 운행기록과 연결된 GPS 경로를 삭제할까요? 이 작업은 되돌릴 수 없습니다.")
+            .setNegativeButton("취소", null)
+            .setPositiveButton("삭제") { _, _ ->
+                selected.forEach { trip ->
+                    TripLedger.delete(context, trip.vin, trip.startedAt, trip.endedAt)
+                    TripLedger.routeIdsForMap(context, trip).forEach { RouteLedger.delete(context, it) }
+                }
+                selectedTripKeys.clear()
+                tripSelectionPopup?.dismiss()
+                renderTripLog()
+            }.show()
+    }
+
+    private fun renderMaintenancePage() {
+        val records = MaintenanceLedger.records(context)
+        val totalCost = records.sumOf { it.costWon }
+        card(tripPage).apply {
+            addView(text("차계부", 13f, accent, true))
+            addView(text("정비 기록", 24f, ink, true))
+            addView(text("수리와 소모품 교체 내역을 한곳에서 관리하세요.", 13f, muted))
+            space(14)
+            val metrics = row()
+            metrics.addView(tripMetric("누적 정비비", "${String.format(Locale.KOREA, "%,d", totalCost)}원"), LinearLayout.LayoutParams(0, -2, 1f))
+            metrics.addView(tripMetric("기록 건수", "${records.size}건"), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
+            addView(metrics)
+            space(12)
+            addView(action("+ 정비 기록 추가", true) { showMaintenanceEntryDialog() }, LinearLayout.LayoutParams(-1, -2))
+            if (records.isEmpty()) {
+                space(14)
+                addView(text("아직 정비 기록이 없습니다. 엔진오일·타이어·소모품 교체처럼 필요한 내역을 추가해 보세요.", 13f, muted))
+            }
+        }
+        if (records.isNotEmpty()) tripPage.addView(text("최근 정비 내역", 18f, ink, true), LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        records.forEach { record ->
+            card(tripPage).apply {
+                val header = row()
+                header.addView(text(SimpleDateFormat("yyyy.MM.dd HH:mm", Locale.KOREA).format(Date(record.occurredAt)), 13f, accent, true),
+                    LinearLayout.LayoutParams(0, -2, 1f))
+                header.addView(action("수정", false) { showMaintenanceEntryDialog(record) }, LinearLayout.LayoutParams(-2, -2))
+                header.addView(action("삭제", false) {
+                    AlertDialog.Builder(context)
+                        .setTitle("정비 기록 삭제")
+                        .setMessage("이 정비 기록을 삭제할까요?")
+                        .setNegativeButton("취소", null)
+                        .setPositiveButton("삭제") { _, _ -> MaintenanceLedger.delete(context, record.id); renderTripLog() }
+                        .show()
+                }, LinearLayout.LayoutParams(-2, -2).apply { marginStart = dp(6) })
+                addView(header)
+                addView(text(record.description, 17f, ink, true))
+                addView(text("${String.format(Locale.KOREA, "%,d", record.costWon)}원", 20f, accent, true))
+                val details = listOfNotNull(
+                    record.odometerKm?.let { "주행거리 ${"%.1f".format(it)} km" },
+                    record.shop.takeIf { it.isNotBlank() }
+                ).joinToString(" · ")
+                if (details.isNotBlank()) addView(text(details, 12f, muted))
+                if (record.note.isNotBlank()) {
+                    space(6)
+                    addView(text(record.note, 13f, muted))
+                }
+            }
+        }
+    }
+
+    private fun showMaintenanceEntryDialogLegacy(record: MaintenanceRecord? = null) {
+        val form = column().apply { setPadding(dp(20), dp(4), dp(20), dp(4)) }
+        fun field(label: String, value: String = "", type: Int = InputType.TYPE_CLASS_TEXT): EditText {
+            form.addView(text(label, 12f, muted, true))
+            return EditText(context).apply {
+                setText(value); inputType = type; setTextColor(ink); setHintTextColor(muted)
+                backgroundTintList = ColorStateList.valueOf(accent)
+                form.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+            }
+        }
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA).apply { isLenient = false }
+        val occurredCalendar = java.util.Calendar.getInstance().apply { record?.let { timeInMillis = it.occurredAt } }
+        form.addView(text("날짜·시간 *", 12f, muted, true))
+        val date = TextView(context).apply {
+            textSize = 16f; setTextColor(ink); gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14)); background = shape(Color.rgb(34, 46, 61), 12)
+            fun updateLabel() { text = dateFormat.format(Date(occurredCalendar.timeInMillis)) }
+            updateLabel()
+            setOnClickListener {
+                android.app.DatePickerDialog(context, { _, year, month, day ->
+                    occurredCalendar.set(java.util.Calendar.YEAR, year)
+                    occurredCalendar.set(java.util.Calendar.MONTH, month)
+                    occurredCalendar.set(java.util.Calendar.DAY_OF_MONTH, day)
+                    android.app.TimePickerDialog(context, { _, hour, minute ->
+                        occurredCalendar.set(java.util.Calendar.HOUR_OF_DAY, hour)
+                        occurredCalendar.set(java.util.Calendar.MINUTE, minute)
+                        occurredCalendar.set(java.util.Calendar.SECOND, 0)
+                        occurredCalendar.set(java.util.Calendar.MILLISECOND, 0)
+                        updateLabel()
+                    }, occurredCalendar.get(java.util.Calendar.HOUR_OF_DAY), occurredCalendar.get(java.util.Calendar.MINUTE), true).show()
+                }, occurredCalendar.get(java.util.Calendar.YEAR), occurredCalendar.get(java.util.Calendar.MONTH), occurredCalendar.get(java.util.Calendar.DAY_OF_MONTH)).show()
+            }
+            form.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+        val maintenanceTypes = listOf(
+            "타이어 교체", "타이어 위치 교환", "타이어 수리", "와이퍼 블레이드 교체",
+            "에어컨 필터 교체", "워셔액 보충", "브레이크액 점검·교체", "브레이크 패드·디스크 점검",
+            "12V 배터리 교체", "냉각수 점검·교체", "정기 점검", "기타"
+        )
+        form.addView(text("정비 항목 *", 12f, muted, true))
+        val maintenanceType = Spinner(context).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, maintenanceTypes)
+            backgroundTintList = ColorStateList.valueOf(accent)
+            form.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+        val description = field("기타 정비 내용 *", type = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES).apply {
+            visibility = View.GONE
+        }
+        maintenanceType.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                description.visibility = if (maintenanceTypes[position] == "기타") View.VISIBLE else View.GONE
+            }
+        }
+        val cost = field("금액(원) *", type = InputType.TYPE_CLASS_NUMBER)
+        val odometer = field("주행거리(km, 선택)", type = InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
+        val shop = field("정비소·구매처(선택)")
+        val note = field("메모(선택)", type = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply { minLines = 2 }
+        AlertDialog.Builder(context)
+            .setTitle("정비 기록 추가")
+            .setView(form)
+            .setNegativeButton("취소", null)
+            .setPositiveButton("저장") { _, _ ->
+                val costWon = cost.text.toString().trim().toLongOrNull()
+                val odometerKm = odometer.text.toString().trim().takeIf { it.isNotBlank() }?.toDoubleOrNull()
+                val selectedType = maintenanceType.selectedItem.toString()
+                val maintenanceDescription = if (selectedType == "기타") description.text.toString().trim() else selectedType
+                if (maintenanceDescription.isBlank() || costWon == null || odometerKm == null && odometer.text.isNotBlank()) {
+                    Toast.makeText(context, "날짜·정비 항목·금액을 확인해 주세요.", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                MaintenanceLedger.add(context, occurredCalendar.timeInMillis, maintenanceDescription, costWon, odometerKm,
+                    shop.text.toString(), note.text.toString())
+                renderTripLog()
+            }
+            .show()
+    }
+
+    private fun showMaintenanceEntryDialog(record: MaintenanceRecord? = null) {
+        val form = column().apply { setPadding(dp(20), dp(4), dp(20), dp(4)) }
+        fun field(label: String, value: String = "", type: Int = InputType.TYPE_CLASS_TEXT): EditText {
+            form.addView(text(label, 12f, muted, true))
+            return EditText(context).apply {
+                setText(value); inputType = type; setTextColor(ink); setHintTextColor(muted)
+                backgroundTintList = ColorStateList.valueOf(accent)
+                form.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+            }
+        }
+        val dateFormat = SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA)
+        val occurred = java.util.Calendar.getInstance().apply { record?.let { timeInMillis = it.occurredAt } }
+        form.addView(text("날짜·시간 *", 12f, muted, true))
+        val dateButton = TextView(context).apply {
+            textSize = 16f; setTextColor(ink); gravity = Gravity.CENTER_VERTICAL
+            setPadding(dp(14), dp(14), dp(14), dp(14)); background = shape(Color.rgb(34, 46, 61), 12)
+            fun refresh() { text = dateFormat.format(Date(occurred.timeInMillis)) }
+            refresh()
+            setOnClickListener {
+                android.app.DatePickerDialog(context, { _, year, month, day ->
+                    occurred.set(year, month, day)
+                    android.app.TimePickerDialog(context, { _, hour, minute ->
+                        occurred.set(java.util.Calendar.HOUR_OF_DAY, hour)
+                        occurred.set(java.util.Calendar.MINUTE, minute)
+                        occurred.set(java.util.Calendar.SECOND, 0)
+                        occurred.set(java.util.Calendar.MILLISECOND, 0)
+                        refresh()
+                    }, occurred.get(java.util.Calendar.HOUR_OF_DAY), occurred.get(java.util.Calendar.MINUTE), true).show()
+                }, occurred.get(java.util.Calendar.YEAR), occurred.get(java.util.Calendar.MONTH), occurred.get(java.util.Calendar.DAY_OF_MONTH)).show()
+            }
+            form.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+        val types = listOf("타이어 교체", "타이어 위치 교환", "타이어 수리", "와이퍼 블레이드 교체", "에어컨 필터 교체",
+            "워셔액 보충", "브레이크액 점검·교체", "브레이크 패드·디스크 점검", "12V 배터리 교체", "냉각수 점검·교체", "정기 점검", "기타")
+        form.addView(text("정비 항목 *", 12f, muted, true))
+        val type = Spinner(context).apply {
+            adapter = ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, types)
+            backgroundTintList = ColorStateList.valueOf(accent)
+            form.addView(this, LinearLayout.LayoutParams(-1, -2).apply { bottomMargin = dp(8) })
+        }
+        val detail = field("기타 정비 내용 *", type = InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_CAP_SENTENCES)
+        type.onItemSelectedListener = object : android.widget.AdapterView.OnItemSelectedListener {
+            override fun onNothingSelected(parent: android.widget.AdapterView<*>?) = Unit
+            override fun onItemSelected(parent: android.widget.AdapterView<*>?, view: View?, position: Int, id: Long) {
+                detail.visibility = if (types[position] == "기타") View.VISIBLE else View.GONE
+            }
+        }
+        val knownType = record?.let { types.indexOf(it.description) } ?: 0
+        if (knownType >= 0) type.setSelection(knownType) else {
+            type.setSelection(types.lastIndex)
+            detail.setText(record?.description.orEmpty())
+            detail.visibility = View.VISIBLE
+        }
+        if (types[type.selectedItemPosition] != "기타") detail.visibility = View.GONE
+        val cost = field("금액(원) *", record?.costWon?.toString().orEmpty(), InputType.TYPE_CLASS_NUMBER)
+        formatWonInput(cost)
+        val odometer = field("주행거리(km, 선택)", record?.odometerKm?.toString().orEmpty(), InputType.TYPE_CLASS_NUMBER or InputType.TYPE_NUMBER_FLAG_DECIMAL)
+        val shop = field("정비소·구매처(선택)", record?.shop.orEmpty())
+        val note = field("메모(선택)", record?.note.orEmpty(), InputType.TYPE_CLASS_TEXT or InputType.TYPE_TEXT_FLAG_MULTI_LINE).apply { minLines = 2 }
+        AlertDialog.Builder(context)
+            .setTitle(if (record == null) "정비 기록 추가" else "정비 기록 수정")
+            .setView(form)
+            .setNegativeButton("취소", null)
+            .setPositiveButton("저장") { _, _ ->
+                val costWon = cost.text.toString().replace(",", "").toLongOrNull()
+                val odometerKm = odometer.text.toString().trim().takeIf { it.isNotBlank() }?.toDoubleOrNull()
+                val selected = type.selectedItem.toString()
+                val description = if (selected == "기타") detail.text.toString().trim() else selected
+                if (description.isBlank() || costWon == null || (odometer.text.isNotBlank() && odometerKm == null)) {
+                    Toast.makeText(context, "정비 항목과 금액을 확인해 주세요.", Toast.LENGTH_LONG).show()
+                    return@setPositiveButton
+                }
+                if (record == null) MaintenanceLedger.add(context, occurred.timeInMillis, description, costWon, odometerKm, shop.text.toString(), note.text.toString())
+                else MaintenanceLedger.update(context, record.copy(occurredAt = occurred.timeInMillis, description = description, costWon = costWon,
+                    odometerKm = odometerKm, shop = shop.text.toString().trim(), note = note.text.toString().trim()))
+                renderTripLog()
+            }.show()
+    }
+
+    private fun formatWonInput(input: EditText) {
+        var formatting = false
+        input.addTextChangedListener(object : TextWatcher {
+            override fun beforeTextChanged(value: CharSequence?, start: Int, count: Int, after: Int) = Unit
+            override fun onTextChanged(value: CharSequence?, start: Int, before: Int, count: Int) = Unit
+            override fun afterTextChanged(value: Editable?) {
+                if (formatting) return
+                val digits = value?.toString()?.replace(",", "").orEmpty()
+                val formatted = digits.toLongOrNull()?.let { String.format(Locale.KOREA, "%,d", it) } ?: digits
+                if (formatted == value?.toString()) return
+                formatting = true
+                input.setText(formatted)
+                input.setSelection(formatted.length)
+                formatting = false
+            }
+        })
+        input.text?.let { input.setText(it) }
+    }
+
     private fun tripTime(time: Long) = SimpleDateFormat("M.d HH:mm", Locale.KOREA).format(Date(time))
     private fun addSampleRouteTrip() {
         val route = RouteLedger.addSample(context)
         val vin = context.getSharedPreferences("settings", Context.MODE_PRIVATE).getString("vin", "").orEmpty()
-        TripLedger.recordGpsTrip(context, vin, route)
+        TripLedger.recordGpsTrip(context, vin, route, countsTowardLifetime = false)
         onAppendSampleTrip()
         Toast.makeText(context, "예시 GPS 운행기록을 추가했습니다.", Toast.LENGTH_SHORT).show()
         renderTripLog()

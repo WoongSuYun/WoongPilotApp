@@ -80,13 +80,15 @@ class TripLogActivity : AppCompatActivity() {
         }
         val vin = prefs.getString("vin", "").orEmpty()
         val records = TripLedger.records(this, vin)
-        val totalDistance = records.sumOf { it.distanceKm }
-        val efficiencyRecords = records.filter { (it.estimatedKwh ?: 0.0) > 0.0 && (it.efficiencyDistanceKm ?: 0.0) > 0.0 }
+        val lifetime = TripLedger.lifetime(this)
+        val statisticsRecords = records.filter { it.countsTowardLifetime }
+        val totalDistance = statisticsRecords.sumOf { it.distanceKm }
+        val efficiencyRecords = statisticsRecords.filter { (it.estimatedKwh ?: 0.0) > 0.0 && (it.efficiencyDistanceKm ?: 0.0) > 0.0 }
         val totalKwh = efficiencyRecords.sumOf { it.estimatedKwh ?: 0.0 }
         val efficiencyDistance = efficiencyRecords.sumOf { it.efficiencyDistanceKm ?: 0.0 }
-        val totalMinutes = records.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
+        val totalMinutes = statisticsRecords.sumOf { ((it.endedAt - it.startedAt) / 60_000).coerceAtLeast(0) }
         val efficiency = if (totalKwh > 0) efficiencyDistance / totalKwh else null
-        val batteryUsed = records.mapNotNull { it.batteryUsedPercent }.sum()
+        val batteryUsed = statisticsRecords.mapNotNull { it.batteryUsedPercent }.sum()
         card().apply {
             addView(label("누적 운행", 13f, Color.rgb(114, 235, 198)))
             val first = LinearLayout(this@TripLogActivity).apply { orientation = LinearLayout.HORIZONTAL }
@@ -97,7 +99,8 @@ class TripLogActivity : AppCompatActivity() {
             second.addView(tripMetric("사용 에너지", "${"%.1f".format(totalKwh)} kWh"), LinearLayout.LayoutParams(0, -2, 1f))
             second.addView(tripMetric("평균 전비", efficiency?.let { "${"%.1f".format(it)} km/kWh" } ?: "—"), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })
             addView(second, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
-            addView(label("${records.size}회 운행 · 배터리 총 ${batteryUsed}% 사용", 13f, Color.LTGRAY))
+            addView(label("${statisticsRecords.size}회 운행 · 배터리 총 ${batteryUsed}% 사용", 13f, Color.LTGRAY))
+            addView(label("누적 ${"%.1f".format(lifetime.distanceKm)} km · ${lifetime.tripCount}회 운행", 12f, Color.LTGRAY))
         }
         body.addView(label("운행 기록", 18f).apply { typeface = Typeface.DEFAULT_BOLD })
         body.addView(label("전비는 차량 모델·트림으로 자동 선택한 사용 가능 배터리 용량과 배터리 % 변화로 계산합니다.", 12f, Color.LTGRAY))

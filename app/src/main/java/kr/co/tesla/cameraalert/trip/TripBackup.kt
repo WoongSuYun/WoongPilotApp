@@ -8,9 +8,9 @@ import org.json.JSONObject
 /** Portable driving-data backup. Gemini audio has its own separately managed backup file. */
 object TripBackup {
     private const val FORMAT = "woongpilot-trip-backup"
-    private const val VERSION = 3
+    private const val VERSION = 4
 
-    data class RestoreResult(val trips: Int, val routes: Int, val audioCache: Int)
+    data class RestoreResult(val trips: Int, val routes: Int, val maintenance: Int, val audioCache: Int)
 
     fun export(context: Context): String = JSONObject().apply {
         put("format", FORMAT)
@@ -18,6 +18,7 @@ object TripBackup {
         put("createdAt", System.currentTimeMillis())
         put("trips", TripLedger.backupRecords(context))
         put("routes", RouteLedger.backupRecords(context))
+        put("maintenance", MaintenanceLedger.backupRecords(context))
     }.toString()
 
     /** Merges backup data with the device so current records are never overwritten. */
@@ -30,6 +31,7 @@ object TripBackup {
         val routes = backup.optJSONArray("routes") ?: error("GPS 경로 데이터가 없습니다.")
         // Version 2 briefly stored audio inside the driving backup. Keep that file restorable.
         val legacyAudio = if (version == 2) GeminiTts(context).restoreCachedAudio(backup.optJSONArray("geminiAudioCache") ?: org.json.JSONArray()) else 0
-        return RestoreResult(TripLedger.restoreRecords(context, trips), RouteLedger.restoreRecords(context, routes), legacyAudio)
+        val maintenance = if (version >= 4) MaintenanceLedger.restoreRecords(context, backup.optJSONArray("maintenance") ?: org.json.JSONArray()) else 0
+        return RestoreResult(TripLedger.restoreRecords(context, trips), RouteLedger.restoreRecords(context, routes), maintenance, legacyAudio)
     }
 }
