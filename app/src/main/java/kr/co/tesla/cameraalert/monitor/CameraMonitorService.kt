@@ -12,6 +12,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.content.ContextCompat
 import kr.co.tesla.cameraalert.MainActivity
 import kr.co.tesla.cameraalert.TeslaAuth
+import kr.co.tesla.cameraalert.TeslaVehicleCache
 import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.kakao.KakaoSafetyMonitor
 import kr.co.tesla.cameraalert.model.*
@@ -361,6 +362,7 @@ class CameraMonitorService : Service(), LocationListener {
             val data = withContext(Dispatchers.IO) {
                 runCatching { TeslaAuth.vehicleData(this@CameraMonitorService, vin, requireFresh = true) }
             }.getOrNull()
+            data?.let { cacheTeslaVehicleData(vin, it) }
             if (data?.odometerKm != null) {
                 val battery = data.usableBatteryPercent ?: data.batteryPercent
                 if (battery != null) {
@@ -388,7 +390,18 @@ class CameraMonitorService : Service(), LocationListener {
             val data = withContext(Dispatchers.IO) {
                 runCatching { TeslaAuth.vehicleData(this@CameraMonitorService, vin, requireFresh = true) }
             }.getOrNull()
+            data?.let { cacheTeslaVehicleData(vin, it) }
             val battery = data?.usableBatteryPercent ?: data?.batteryPercent
+            val skipZeroBatteryTrip = data?.odometerKm != null && battery != null &&
+                prefs.getBoolean("trip_skip_zero_battery", false) &&
+                TripLedger.hasZeroBatteryUse(this@CameraMonitorService, battery)
+            if (skipZeroBatteryTrip) {
+                TripLedger.discardActive(this@CameraMonitorService)
+                tripStatus("운행 기록 제외 · 배터리 사용량 0%")
+                status("감시 종료")
+                stopSelf()
+                return@launch
+            }
             val telemetryTrip = if (data?.odometerKm != null && battery != null)
                 TripLedger.finish(this@CameraMonitorService, data.odometerKm, battery, System.currentTimeMillis(), route?.startedAt)
             else null
@@ -419,6 +432,14 @@ class CameraMonitorService : Service(), LocationListener {
             stopSelf()
         }
     }
+
+    /** Reuse the trip snapshot to refresh the dashboard cache without another Tesla API call. */
+    private fun cacheTeslaVehicleData(vin: String, fresh: TeslaAuth.VehicleData) {
+        val previous = TeslaVehicleCache.load(this, vin)?.data
+        TeslaVehicleCache.save(this, vin, TeslaVehicleCache.merge(fresh, previous))
+        prefs.edit().putLong("tesla_monitor_updated_at", System.currentTimeMillis()).apply()
+    }
+
     private fun saveGpsTrip(route: kr.co.tesla.cameraalert.route.RouteRecord?, vin: String): kr.co.tesla.cameraalert.trip.TripRecord? {
         val gpsTrip = TripLedger.recordGpsTrip(this, vin, route)
         val message = if (gpsTrip != null) "GPS 차계부 저장 · ${"%.1f".format(gpsTrip.distanceKm)} km"
@@ -538,6 +559,13 @@ class CameraMonitorService : Service(), LocationListener {
                 return@launch
             }
             if (data.gear == "P") {
+                if (prefs.getBoolean("trip_skip_zero_battery", false) &&
+                    TripLedger.hasZeroBatteryUse(this@CameraMonitorService, battery)) {
+                    TripLedger.discardActive(this@CameraMonitorService)
+                    tripStationarySince = null
+                    tripStatus("운행 기록 제외 · 배터리 사용량 0%")
+                    return@launch
+                }
                 val record = TripLedger.finish(this@CameraMonitorService, odometer, battery, System.currentTimeMillis())
                 if (record == null) {
                     if (TripLedger.active(this@CameraMonitorService) != null) {

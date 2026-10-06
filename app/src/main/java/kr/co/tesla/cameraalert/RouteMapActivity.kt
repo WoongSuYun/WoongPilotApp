@@ -16,6 +16,7 @@ import com.kakao.vectormap.route.RouteLineStyle
 import com.kakao.vectormap.route.RouteLineStyles
 import com.kakao.vectormap.route.RouteLineStylesSet
 import kr.co.tesla.cameraalert.route.RouteLedger
+import kr.co.tesla.cameraalert.route.RouteRecord
 
 /** Native Kakao map: Korean map labels and an overlay made from the exact recorded GPS points. */
 class RouteMapActivity : AppCompatActivity() {
@@ -53,10 +54,9 @@ class RouteMapActivity : AppCompatActivity() {
                 }.toTypedArray())
                 // RouteLineOptions without an explicit ID replaces the previous line on the
                 // default layer.  Put every merged-card route into one RouteLine as segments.
-                val segments = routes.mapIndexedNotNull { index, route ->
-                    val routePoints = route.points.map { LatLng.from(it.latitude, it.longitude) }
-                    routePoints.takeIf { it.size >= 2 }?.let {
-                        RouteLineSegment.from(it).setStyles(styles.getStyles(index % routeColors.size))
+                val segments = routes.flatMapIndexed { index, route ->
+                    drawableSegments(route).map { routePoints ->
+                        RouteLineSegment.from(routePoints).setStyles(styles.getStyles(index % routeColors.size))
                     }
                 }
                 if (segments.isNotEmpty()) {
@@ -72,6 +72,22 @@ class RouteMapActivity : AppCompatActivity() {
     override fun onResume() { super.onResume(); if (::mapView.isInitialized) mapView.resume() }
     override fun onPause() { if (::mapView.isInitialized) mapView.pause(); super.onPause() }
     override fun onDestroy() { if (::mapView.isInitialized) mapView.finish(); super.onDestroy() }
+
+    /** Do not draw a straight line across a period without trustworthy GPS positions. */
+    private fun drawableSegments(route: RouteRecord): List<List<LatLng>> {
+        val segments = mutableListOf<List<LatLng>>()
+        val current = mutableListOf<LatLng>()
+        route.points.forEach { point ->
+            if (point.breakBefore && current.isNotEmpty()) {
+                if (current.size >= 2) segments += current.toList()
+                current.clear()
+            }
+            current += LatLng.from(point.latitude, point.longitude)
+        }
+        if (current.size >= 2) segments += current
+        return segments
+    }
+
     companion object {
         const val EXTRA_STARTED_AT = "started_at"
         const val EXTRA_STARTED_ATS = "started_ats"

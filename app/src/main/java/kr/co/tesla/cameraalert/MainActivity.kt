@@ -85,6 +85,12 @@ class MainActivity : AppCompatActivity() {
             dashboard.tripMonitorStatus.text = prefs.getString("trip_status", "운행기록 대기")
             dashboard.refreshTripLog()
         }
+        if (key == "tesla_monitor_updated_at") runOnUiThread {
+            val vin = prefs.getString("vin", "").orEmpty()
+            TeslaVehicleCache.load(this, vin)?.let { snapshot ->
+                dashboard.updateTeslaOverview(vin, snapshot.data, lastTeslaUpdateMessage(snapshot.updatedAt))
+            }
+        }
     }
     private val permissions = registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()) {
         if (requiredPermissions().all { ContextCompat.checkSelfPermission(this, it) == PackageManager.PERMISSION_GRANTED })

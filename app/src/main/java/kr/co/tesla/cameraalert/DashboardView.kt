@@ -624,6 +624,15 @@ class DashboardView(context: Context, savedTeslaName: String,
             }
         })
         settings.space(8)
+        settings.addView(Switch(context).apply {
+            text = "배터리 사용량 0% 운행 기록 제외"; textSize = 16f
+            isChecked = prefs.getBoolean("trip_skip_zero_battery", false)
+            setOnCheckedChangeListener { _, enabled ->
+                prefs.edit().putBoolean("trip_skip_zero_battery", enabled).apply()
+            }
+        })
+        settings.addView(text("Tesla 시작·종료 배터리 잔량이 같으면 해당 자동 운행기록을 저장하지 않습니다.", 12f, muted))
+        settings.space(8)
         val backup = row()
         backup.addView(action("운행 데이터 백업", false, onExportTrips), LinearLayout.LayoutParams(0, -2, 1f))
         backup.addView(action("운행 데이터 복원", false, onImportTrips), LinearLayout.LayoutParams(0, -2, 1f).apply { marginStart = dp(8) })

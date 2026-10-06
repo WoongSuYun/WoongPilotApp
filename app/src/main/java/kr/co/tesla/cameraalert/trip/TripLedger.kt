@@ -192,6 +192,15 @@ object TripLedger {
 
     fun active(context: Context): JSONObject? = prefs(context).getString(ACTIVE, null)?.let(::JSONObject)
 
+    /** True only when Tesla reported the same whole-percent battery level at both ends. */
+    fun hasZeroBatteryUse(context: Context, endBatteryPercent: Int): Boolean =
+        active(context)?.optInt("batteryPercent", Int.MIN_VALUE) == endBatteryPercent
+
+    /** Ends an in-progress automatic record without adding it to the ledger. */
+    fun discardActive(context: Context) {
+        prefs(context).edit().remove(ACTIVE).apply()
+    }
+
     /**
      * Resolves every route belonging to a card.  Older trip cards did not persist the route ID;
      * for those, use the same time-window match that the individual-card screen uses.
