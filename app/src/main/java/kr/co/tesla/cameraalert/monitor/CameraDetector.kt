@@ -1,7 +1,5 @@
 package kr.co.tesla.cameraalert.monitor
 
-import kr.co.tesla.cameraalert.model.CameraMatch
-import kr.co.tesla.cameraalert.model.SpeedCamera
 import kr.co.tesla.cameraalert.model.VehiclePosition
 import kotlin.math.*
 
@@ -14,24 +12,6 @@ object CameraDetector {
         maxAngleDegrees: Double = 35.0
     ): Boolean = angularDifference(vehicle.heading, bearingDegrees(
         vehicle.latitude, vehicle.longitude, latitude, longitude)) <= maxAngleDegrees
-
-    fun nearestAhead(
-        vehicle: VehiclePosition,
-        cameras: List<SpeedCamera>,
-        maxDistanceMeters: Double = 700.0,
-        maxAngleDegrees: Double = 35.0
-    ): CameraMatch? = cameras.asSequence().filter { camera ->
-        // Cheap bounding box before trigonometry, important for nationwide datasets.
-        val latitudeRadius = maxDistanceMeters / 111_000.0
-        val longitudeRadius = latitudeRadius / cos(Math.toRadians(vehicle.latitude)).coerceAtLeast(0.01)
-        abs(camera.latitude - vehicle.latitude) <= latitudeRadius &&
-            abs((camera.longitude - vehicle.longitude + 540) % 360 - 180) <= longitudeRadius
-    }.map { camera ->
-        val distance = distanceMeters(vehicle.latitude, vehicle.longitude, camera.latitude, camera.longitude)
-        val bearing = bearingDegrees(vehicle.latitude, vehicle.longitude, camera.latitude, camera.longitude)
-        CameraMatch(camera, distance, angularDifference(vehicle.heading, bearing))
-    }.filter { it.distanceMeters <= maxDistanceMeters && it.angleDegrees <= maxAngleDegrees }
-        .minByOrNull { it.distanceMeters }
 
     internal fun distanceMeters(lat1: Double, lon1: Double, lat2: Double, lon2: Double): Double {
         val earth = 6_371_000.0

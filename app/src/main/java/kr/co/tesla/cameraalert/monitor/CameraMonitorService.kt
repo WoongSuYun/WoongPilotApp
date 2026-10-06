@@ -13,7 +13,6 @@ import androidx.core.content.ContextCompat
 import kr.co.tesla.cameraalert.MainActivity
 import kr.co.tesla.cameraalert.TeslaAuth
 import kr.co.tesla.cameraalert.TeslaVehicleCache
-import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.kakao.KakaoSafetyMonitor
 import kr.co.tesla.cameraalert.model.*
 import kr.co.tesla.cameraalert.voice.AlertSpeaker
@@ -26,11 +25,12 @@ import kotlinx.coroutines.*
 
 class CameraMonitorService : Service(), LocationListener {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
+    private val mainHandler = Handler(Looper.getMainLooper())
+    private lateinit var gpsThread: HandlerThread
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private val location by lazy { getSystemService(LocationManager::class.java) }
     private var task: Job? = null
     private var gpsWatchdog: Job? = null
-    private var cameras = emptyList<SpeedCamera>()
     private var gpsActive = false
     private var lastFix = 0L
     private var lastOverspeedToneAt = 0L
@@ -87,6 +87,7 @@ class CameraMonitorService : Service(), LocationListener {
 
     override fun onCreate() {
         super.onCreate()
+        gpsThread = HandlerThread("woongpilot-gps").apply { start() }
         running = true
         speaker = AlertSpeaker(this)
         geminiSpeaker = GeminiTts(this)
@@ -127,9 +128,6 @@ class CameraMonitorService : Service(), LocationListener {
         task = scope.launch {
             previous?.join()
             try {
-                cameras = withContext(Dispatchers.IO) {
-                    runCatching { CameraRepository(this@CameraMonitorService).load() }.getOrDefault(emptyList())
-                }
                 // Monitoring is deliberately caller-controlled. It only uses phone GPS and
                 // never scans, connects to, or registers a Tesla vehicle.
                 startGps()
@@ -143,7 +141,7 @@ class CameraMonitorService : Service(), LocationListener {
     private fun startGps() {
         check(location.isProviderEnabled(LocationManager.GPS_PROVIDER)) { "휴대폰 위치(GPS)를 켜 주세요" }
         if (!gpsActive) {
-            location.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, Looper.getMainLooper())
+            location.requestLocationUpdates(LocationManager.GPS_PROVIDER, 1000L, 0f, this, gpsThread.looper)
             gpsActive = true
             monitoringActive = true
             prefs.edit().putString("monitor_state", "감시 중").apply()
@@ -204,20 +202,26 @@ class CameraMonitorService : Service(), LocationListener {
         if (!gpsActive) return
         val ageMs = (SystemClock.elapsedRealtimeNanos() - fix.elapsedRealtimeNanos) / 1_000_000
         if (ageMs !in 0..5_000) {
-            status("휴대폰 GPS 감시 중 · 위치 신호 갱신 대기"); return
+            mainHandler.post { if (gpsActive) status("휴대폰 GPS 감시 중 · 위치 신호 갱신 대기") }; return
         }
         if (!fix.hasAccuracy() || fix.accuracy > 40f) {
-            status("휴대폰 GPS 감시 중 · 위치 정확도 확인 중"); return
+            mainHandler.post { if (gpsActive) status("휴대폰 GPS 감시 중 · 위치 정확도 확인 중") }; return
         }
-        // Tesla telemetry is deliberately limited to the monitor's start and stop actions.
+        // File writes stay off the main/UI queue, so a busy alert or overlay cannot make a
+        // fresh GPS fix fail the five-second age check above.
         RouteLedger.observe(this, fix)
+        lastFix = SystemClock.elapsedRealtime()
+        mainHandler.post { if (gpsActive) processLocationForAlerts(fix) }
+    }
+
+    /** UI, notification and alert state deliberately stay on the main thread. */
+    private fun processLocationForAlerts(fix: Location) {
         if (!fix.hasSpeed() || fix.speed < 2f) {
             status("차량 정차 중 · 카메라 감시 준비됨"); return
         }
         if (!fix.hasBearing()) {
             status("주행 감지됨 · GPS 방향 확인 중"); return
         }
-        lastFix = SystemClock.elapsedRealtime()
         val position = VehiclePosition(fix.latitude, fix.longitude, fix.bearing.toDouble(),
             fix.speed * 3.6, fix.time)
         val now = SystemClock.elapsedRealtime()
@@ -225,11 +229,9 @@ class CameraMonitorService : Service(), LocationListener {
         updateActiveSpeedCamera(position)
         val healthy = kakao?.healthy(isOnline()) == true
         val enabledTypes = SafetyAlertSettings.enabledTypes(this)
-        val event = HybridAlerts.select(healthy,
-            if (healthy) kakao?.nearest(position, enabledTypes) else null,
-            if (!healthy && SafetyAlertType.SPEED_CAMERA in enabledTypes) CameraDetector.nearestAhead(position, cameras) else null)
-        val source = if (healthy) "카카오" else if (cameras.isNotEmpty()) "공공데이터 보조" else "안내 불가 · 공공데이터 없음"
-        prefs.edit().putString("camera_source", source).apply()
+        val event = HybridAlerts.select(healthy, if (healthy) kakao?.nearest(position, enabledTypes) else null)
+        val source = if (healthy) "카카오" else "카카오 안전 운행 연결 대기"
+        if (prefs.getString("camera_source", "") != source) prefs.edit().putString("camera_source", source).apply()
         if (event == null) {
             overspeedCameraId = null
             if (activeSpeedCamera == null) CameraAlertOverlay.hide()
@@ -678,6 +680,7 @@ class CameraMonitorService : Service(), LocationListener {
         monitoringActive = false
         prefs.edit().putString("monitor_state", "감시 종료").apply()
         task?.cancel(); scope.cancel(); stopGps(); sounds.release(); speaker.shutdown(); geminiSpeaker.shutdown()
+        gpsThread.quitSafely()
         CameraAlertNotification.cancel(this)
         CameraAlertOverlay.hide()
         stopForeground(STOP_FOREGROUND_REMOVE)

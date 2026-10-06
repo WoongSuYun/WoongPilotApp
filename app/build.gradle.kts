@@ -14,8 +14,6 @@ val localConfig = Properties().apply {
 }
 val kakaoNativeKey = providers.gradleProperty("KAKAO_NATIVE_APP_KEY")
     .orElse(localConfig.getProperty("KAKAO_NATIVE_APP_KEY", ""))
-val dataGoServiceKey = providers.gradleProperty("DATA_GO_KR_SERVICE_KEY")
-    .orElse(localConfig.getProperty("DATA_GO_KR_SERVICE_KEY", ""))
 val buildDate = ZonedDateTime.now(ZoneId.of("Asia/Seoul"))
     .format(DateTimeFormatter.ofPattern("yyyy.MM.dd HH:mm"))
 
@@ -30,7 +28,6 @@ android {
         versionCode = 1008
         versionName = "0.5.17"
         buildConfigField("String", "KAKAO_NATIVE_APP_KEY", "\"${kakaoNativeKey.get()}\"")
-        buildConfigField("String", "DATA_GO_KR_SERVICE_KEY", "\"${dataGoServiceKey.get()}\"")
         buildConfigField("String", "BUILD_DATE", "\"$buildDate\"")
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

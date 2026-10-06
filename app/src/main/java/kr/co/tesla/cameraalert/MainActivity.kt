@@ -21,7 +21,6 @@ import com.google.android.gms.auth.api.signin.GoogleSignIn
 import com.google.android.gms.auth.api.signin.GoogleSignInOptions
 import com.google.android.gms.common.api.ApiException
 import com.google.android.gms.common.api.Scope
-import kr.co.tesla.cameraalert.data.CameraRepository
 import kr.co.tesla.cameraalert.monitor.CameraMonitorService
 import kr.co.tesla.cameraalert.monitor.CameraAlertNotification
 import kr.co.tesla.cameraalert.kakao.KakaoSafetyMonitor
@@ -42,9 +41,6 @@ import kotlin.math.roundToInt
 
 class MainActivity : AppCompatActivity() {
     private companion object {
-        const val CAMERA_DATA_UPDATED_AT = "camera_data_updated_at"
-        const val CAMERA_DATA_COUNT = "camera_data_count"
-        const val CAMERA_DATA_REFRESH_INTERVAL_MS = 30L * 24 * 60 * 60 * 1_000
     }
     private val prefs by lazy { getSharedPreferences("settings", MODE_PRIVATE) }
     private lateinit var dashboard: DashboardView
@@ -147,7 +143,6 @@ class MainActivity : AppCompatActivity() {
             onSafetyAlertSettings = { showSafetyAlertSettings() },
             onSpeedCameraAlertSettings = { showSpeedCameraAlertSettings() },
             onPreviewCameraAlert = { previewCameraAlert() }, onMonitoringSettings = { showMonitoringSettings() },
-            onCameraList = { startActivity(Intent(this, CameraListActivity::class.java)) },
             onExportTrips = { exportTrips.launch("woongpilot-driving-backup.json") },
             onImportTrips = { importTrips.launch(arrayOf("application/json", "text/plain")) },
             onConfigureSheets = { showGoogleSheetsSettings() }, onOpenSheets = { openGoogleSheet() },
@@ -173,20 +168,6 @@ class MainActivity : AppCompatActivity() {
         androidx.core.view.WindowCompat.getInsetsController(window, dashboard).apply {
             isAppearanceLightStatusBars = false
             isAppearanceLightNavigationBars = false
-        }
-        // The public camera database is a local fallback. Download it on a fresh install,
-        // then refresh it at most once every 30 days.
-        lifecycleScope.launch(Dispatchers.IO) {
-            val repository = CameraRepository(this@MainActivity)
-            val needsInitialDownload = repository.load().isEmpty()
-            val lastRefresh = prefs.getLong(CAMERA_DATA_UPDATED_AT, 0L)
-            val needsMonthlyRefresh = System.currentTimeMillis() - lastRefresh >= CAMERA_DATA_REFRESH_INTERVAL_MS
-            if (needsInitialDownload || needsMonthlyRefresh) {
-                runCatching { repository.refresh(BuildConfig.DATA_GO_KR_SERVICE_KEY) }.onSuccess { count ->
-                    prefs.edit().putLong(CAMERA_DATA_UPDATED_AT, System.currentTimeMillis())
-                        .putInt(CAMERA_DATA_COUNT, count).apply()
-                }
-            }
         }
         if (hasLocationPermission() && isGpsEnabled()) checkKakao()
         else dashboard.kakaoStatus.text = "카카오 안전 안내를 사용하려면 위치 권한과 GPS를 켠 뒤 감시를 시작하세요."
@@ -781,15 +762,6 @@ class MainActivity : AppCompatActivity() {
             text = "다른 앱 위에 표시 권한이 있어야 하며, 단속 경고 중에만 제한속도와 거리를 띄웁니다."
             setPadding(0, 0, 0, padding / 2)
         })
-        val cameraDataStatus = TextView(this).apply {
-            text = publicCameraDataStatus()
-            textSize = 13f
-            setPadding(0, padding, 0, padding / 2)
-        }
-        panel.addView(cameraDataStatus)
-        val updateCameraData = Button(this).apply { text = "카메라 데이터 지금 업데이트" }
-        updateCameraData.setOnClickListener { refreshPublicCameraData(updateCameraData, cameraDataStatus) }
-        panel.addView(updateCameraData)
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("감시 모드 설정")
             .setView(panel)
@@ -803,29 +775,6 @@ class MainActivity : AppCompatActivity() {
                     startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
                 } else status.text = "감시 모드 설정을 저장했습니다."
             }.show()
-    }
-    private fun publicCameraDataStatus(): String {
-        val count = prefs.getInt(CAMERA_DATA_COUNT, 0)
-        val updatedAt = prefs.getLong(CAMERA_DATA_UPDATED_AT, 0L)
-        return if (updatedAt == 0L || count == 0) "공공데이터 카메라: 아직 저장된 목록 없음"
-        else "공공데이터 카메라: ${count}건\n마지막 갱신: ${java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", Locale.KOREA).format(java.util.Date(updatedAt))}"
-    }
-    private fun refreshPublicCameraData(button: Button? = null, dataStatus: TextView? = null) {
-        button?.isEnabled = false
-        lifecycleScope.launch(Dispatchers.IO) {
-            val result = runCatching { CameraRepository(this@MainActivity).refresh(BuildConfig.DATA_GO_KR_SERVICE_KEY) }
-            result.onSuccess { count ->
-                prefs.edit().putLong(CAMERA_DATA_UPDATED_AT, System.currentTimeMillis())
-                    .putInt(CAMERA_DATA_COUNT, count).apply()
-            }
-            withContext(Dispatchers.Main) {
-                Toast.makeText(this@MainActivity,
-                    result.fold({ "공공데이터 카메라 ${it}건을 업데이트했습니다." },
-                        { "카메라 데이터 업데이트 실패: ${it.message}" }), Toast.LENGTH_LONG).show()
-                if (result.isSuccess) dataStatus?.text = publicCameraDataStatus()
-                button?.isEnabled = true
-            }
-        }
     }
     private fun openGoogleSheet() {
         val sheetId = GoogleSheetsSync.settings(this).sheetId

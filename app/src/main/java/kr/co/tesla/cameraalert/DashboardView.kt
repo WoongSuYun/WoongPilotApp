@@ -29,7 +29,7 @@ class DashboardView(context: Context, savedTeslaName: String,
     onWakeTesla: () -> Unit, onRefreshTesla: () -> Unit, onVoiceSettings: () -> Unit,
     onGeminiSettings: () -> Unit, onGeminiAudioLibrary: () -> Unit, onSafetyAlertSettings: () -> Unit,
     onSpeedCameraAlertSettings: () -> Unit,
-    onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit, onCameraList: () -> Unit,
+    onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit,
     private val onExportTrips: () -> Unit, private val onImportTrips: () -> Unit,
     private val onConfigureSheets: () -> Unit, private val onOpenSheets: () -> Unit,
     private val onAppendSampleTrip: () -> Unit, private val onOpenRouteLog: () -> Unit
@@ -333,7 +333,6 @@ class DashboardView(context: Context, savedTeslaName: String,
             space(8)
             addView(action("감시 모드 설정", false, onMonitoringSettings), LinearLayout.LayoutParams(-1, -2))
             space(8)
-            addView(action("공공데이터 카메라 목록", false, onCameraList), LinearLayout.LayoutParams(-1, -2))
         }
         card(guidePage).apply {
             heading(this, "02", "카카오 안전 안내", "목적지 없이 · 과속카메라 안내")

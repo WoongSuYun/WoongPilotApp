@@ -36,7 +36,6 @@
         <activity android:name=".TripLogActivity" android:exported="false" />
         <activity android:name=".RouteLogActivity" android:exported="false" />
         <activity android:name=".RouteMapActivity" android:exported="false" />
-        <activity android:name=".CameraListActivity" android:exported="false" />
         <activity
             android:name=".AutomationActionActivity"
             android:exported="true"
