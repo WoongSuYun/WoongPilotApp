@@ -33,17 +33,19 @@ class CameraMonitorService : Service(), LocationListener {
     private var gpsWatchdog: Job? = null
     private var gpsActive = false
     private var lastFix = 0L
-    private var lastOverspeedToneAt = 0L
-    private var overspeedCameraId: String? = null
     private lateinit var speaker: AlertSpeaker
     private lateinit var geminiSpeaker: GeminiTts
     private lateinit var sounds: AppSoundPlayer
+    // Legacy GPS-derived alert state remains temporarily isolated below while the monitor
+    // transitions to KNSDK voice callbacks. It is no longer entered from location updates.
     private val alerts = CameraAlertGate()
     private var activeCameraId: String? = null
     private var dismissedCameraId: String? = null
     private var dismissedSpeedCamera: DismissedSpeedCamera? = null
     private var activeSpeedCamera: ActiveSpeedCamera? = null
     private var departedSpeedCamera: DepartedSpeedCamera? = null
+    private var lastOverspeedToneAt = 0L
+    private var overspeedCameraId: String? = null
     private var kakao: KakaoSafetyMonitor? = null
     private var kakaoTask: Job? = null
     private var tripMovingSince: Long? = null
@@ -56,34 +58,13 @@ class CameraMonitorService : Service(), LocationListener {
     private var tripObservedVin = ""
     private var tripStartSnapshotRequested = false
 
-    private data class ActiveSpeedCamera(
-        val id: String,
-        val latitude: Double,
-        val longitude: Double,
-        val limitKph: Int?,
-        val approachHeading: Double,
-        var closestDistanceMeters: Double = Double.POSITIVE_INFINITY,
-        var previousDistanceMeters: Double = Double.POSITIVE_INFINITY,
-        var movingAwaySamples: Int = 0
-    )
-
-    /** A camera that briefly became farther away; a broad curve can legitimately do this. */
-    private data class DepartedSpeedCamera(
-        val id: String,
-        val latitude: Double,
-        val longitude: Double,
-        val closestDistanceMeters: Double,
-        val approachHeading: Double,
-        var farthestDistanceMeters: Double
-    )
-
-    /** A passed/dismissed camera may be armed again only on a later, real approach. */
-    private data class DismissedSpeedCamera(
-        val id: String,
-        val latitude: Double,
-        val longitude: Double,
-        val approachHeading: Double
-    )
+    private data class ActiveSpeedCamera(val id: String, val latitude: Double, val longitude: Double,
+        val limitKph: Int?, val approachHeading: Double, var closestDistanceMeters: Double = Double.POSITIVE_INFINITY,
+        var previousDistanceMeters: Double = Double.POSITIVE_INFINITY, var movingAwaySamples: Int = 0)
+    private data class DepartedSpeedCamera(val id: String, val latitude: Double, val longitude: Double,
+        val closestDistanceMeters: Double, val approachHeading: Double, var farthestDistanceMeters: Double)
+    private data class DismissedSpeedCamera(val id: String, val latitude: Double, val longitude: Double,
+        val approachHeading: Double)
 
     override fun onCreate() {
         super.onCreate()
@@ -109,10 +90,6 @@ class CameraMonitorService : Service(), LocationListener {
             return START_NOT_STICKY
         }
         if (intent?.action == CameraAlertNotification.DISMISS_ACTION) {
-            dismissedCameraId = activeCameraId
-            activeSpeedCamera?.takeIf { it.id == activeCameraId }?.let {
-                dismissedSpeedCamera = DismissedSpeedCamera(it.id, it.latitude, it.longitude, it.approachHeading)
-            }
             CameraAlertOverlay.hide()
             CameraAlertNotification.cancel(this)
             if (task == null) {
@@ -172,6 +149,14 @@ class CameraMonitorService : Service(), LocationListener {
                 val monitor = KakaoSafetyMonitor()
                 kakao = monitor
                 try {
+                    monitor.onSafetyVoiceRequested = { event ->
+                        mainHandler.post { if (gpsActive) onKakaoSafetyVoice(event) }
+                    }
+                    monitor.useKakaoVoice = {
+                        // Gemini is an explicit replacement mode. When it is off, preserve
+                        // KNSDK's original voice and its exact timing instead of using phone TTS.
+                        !geminiSpeaker.isEnabled() && !isMuted()
+                    }
                     prefs.edit().putString("kakao_status", "카카오 안전 운행 연결 중…").apply()
                     monitor.start(application)
                     prefs.edit().putString("kakao_status", "카카오 인증 완료 · 주행 정보 대기").apply()
@@ -211,10 +196,37 @@ class CameraMonitorService : Service(), LocationListener {
         // fresh GPS fix fail the five-second age check above.
         RouteLedger.observe(this, fix)
         lastFix = SystemClock.elapsedRealtime()
-        mainHandler.post { if (gpsActive) processLocationForAlerts(fix) }
+        mainHandler.post {
+            if (!gpsActive) return@post
+            val source = if (kakao?.healthy(isOnline()) == true) "카카오 안전 운행 중" else "카카오 안전 운행 연결 대기"
+            prefs.edit().putString("camera_source", source).apply()
+            status("${(fix.speed * 3.6).toInt()}km/h · $source")
+        }
     }
 
-    /** UI, notification and alert state deliberately stay on the main thread. */
+    /** KNSDK's own map-matched voice decision; local GPS never creates an alert. */
+    private fun onKakaoSafetyVoice(match: SafetyMatch) {
+        if (!SafetyAlertSettings.isEnabled(this, match.type)) return
+        val distance = match.distanceMeters.toInt().coerceAtLeast(1)
+        val detail = buildString {
+            if (match.type != SafetyAlertType.BUS_LANE) append("${distance}m 앞 · ")
+            if (match.type == SafetyAlertType.SPEED_CAMERA) append("${match.limitKph ?: "--"}km/h · ")
+            append("${match.type.label} · ${match.roadName} · 카카오 안내")
+        }
+        status(detail)
+        CameraAlertNotification.show(this, detail)
+        if (!isMuted()) scope.launch {
+            val geminiSpoken = runCatching {
+                geminiSpeaker.speakSafetyWarning(match.type, distance, match.limitKph)
+            }.getOrDefault(false)
+            val systemSpoken = if (geminiSpoken) true else runCatching {
+                speaker.speakSafetyWarning(match.type, distance, match.limitKph)
+            }.getOrDefault(false)
+            if (!systemSpoken) playFallbackTone()
+        }
+    }
+
+    /** Retained only for binary-compatible cleanup; no location update enters this legacy path. */
     private fun processLocationForAlerts(fix: Location) {
         if (!fix.hasSpeed() || fix.speed < 2f) {
             status("차량 정차 중 · 카메라 감시 준비됨"); return

@@ -28,7 +28,6 @@ class DashboardView(context: Context, savedTeslaName: String,
     onCheckKakao: () -> Unit, onTeslaLogin: () -> Unit, onTeslaLogout: () -> Unit,
     onWakeTesla: () -> Unit, onRefreshTesla: () -> Unit, onVoiceSettings: () -> Unit,
     onGeminiSettings: () -> Unit, onGeminiAudioLibrary: () -> Unit, onSafetyAlertSettings: () -> Unit,
-    onSpeedCameraAlertSettings: () -> Unit,
     onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit,
     private val onExportTrips: () -> Unit, private val onImportTrips: () -> Unit,
     private val onConfigureSheets: () -> Unit, private val onOpenSheets: () -> Unit,
@@ -69,6 +68,7 @@ class DashboardView(context: Context, savedTeslaName: String,
     private val tabButtons = mutableMapOf<String, View>()
     private val selectedTripKeys = mutableSetOf<String>()
     private var tripSelectionPopup: PopupWindow? = null
+    private var visibleTripCount = 30
     private enum class LedgerPage { DRIVES, MAINTENANCE }
     private var ledgerPage = LedgerPage.DRIVES
     private fun tripKey(trip: kr.co.tesla.cameraalert.trip.TripRecord) = "${trip.vin}:${trip.startedAt}:${trip.endedAt}"
@@ -347,8 +347,7 @@ class DashboardView(context: Context, savedTeslaName: String,
             space(16)
             addView(action("Gemini AI 음성 설정", false, onGeminiSettings), LinearLayout.LayoutParams(-1, -2)); space(8)
             addView(action("Gemini 음성 보관함", false, onGeminiAudioLibrary), LinearLayout.LayoutParams(-1, -2)); space(8)
-            addView(action("안전 안내 항목 설정", false, onSafetyAlertSettings), LinearLayout.LayoutParams(-1, -2)); space(8)
-            addView(action("과속카메라 알림 설정", false, onSpeedCameraAlertSettings), LinearLayout.LayoutParams(-1, -2))
+            addView(action("안전 안내 항목 설정", false, onSafetyAlertSettings), LinearLayout.LayoutParams(-1, -2))
         }
         guidePage.addView(text("차량 연결 없이도 휴대폰 GPS·카카오 안전 안내를 사용할 수 있어요.\n화면을 꺼도 실행 중인 감시는 계속됩니다.", 12f, muted).apply {
             gravity = Gravity.CENTER; setPadding(0, dp(6), 0, 0)
@@ -522,8 +521,10 @@ class DashboardView(context: Context, savedTeslaName: String,
         if (records.isEmpty()) {
             tripPage.addView(text("저장된 운행이 없습니다. 자동 기록을 켠 뒤 주행해 보세요.", 14f, muted))
         }
-        records.forEach { trip ->
-            val routeStartedAt = trip.routeStartedAt ?: RouteLedger.matchingStart(context, trip.startedAt, trip.endedAt)
+        records.take(visibleTripCount).forEach { trip ->
+            // Route matching can inspect historical route metadata. Defer it until the user
+            // actually opens or deletes this one card instead of doing it for every row.
+            val routeStartedAt = trip.routeStartedAt
             card(tripPage).apply {
                 val header = row()
                 header.addView(CheckBox(context).apply {
@@ -545,7 +546,8 @@ class DashboardView(context: Context, savedTeslaName: String,
                             .setNegativeButton("취소", null)
                             .setPositiveButton("삭제") { _, _ ->
                                 TripLedger.delete(context, trip.vin, trip.startedAt, trip.endedAt)
-                                routeStartedAt?.let { RouteLedger.delete(context, it) }
+                                (routeStartedAt ?: RouteLedger.matchingStart(context, trip.startedAt, trip.endedAt))
+                                    ?.let { RouteLedger.delete(context, it) }
                                 renderTripLog()
                             }.show()
                     }
@@ -576,16 +578,24 @@ class DashboardView(context: Context, savedTeslaName: String,
                             .setPositiveButton("분리") { _, _ -> TripLedger.split(context, trip); renderTripLog() }.show()
                     }, LinearLayout.LayoutParams(-1, -2))
                 }
-                val routeStarts = TripLedger.routeIdsForMap(context, trip)
-                if (routeStarts.isNotEmpty()) {
-                    space(10)
-                    addView(action("경로 보기", false) {
+                space(10)
+                addView(action("경로 보기", false) {
+                    val routeStarts = TripLedger.routeIdsForMap(context, trip)
+                    if (routeStarts.isEmpty()) {
+                        Toast.makeText(context, "연결된 GPS 경로가 없습니다.", Toast.LENGTH_SHORT).show()
+                    } else {
                         context.startActivity(Intent(context, RouteMapActivity::class.java)
                             .putExtra(RouteMapActivity.EXTRA_STARTED_AT, routeStarts.first())
                             .putExtra(RouteMapActivity.EXTRA_STARTED_ATS, routeStarts.toLongArray()))
-                    }, LinearLayout.LayoutParams(-1, -2))
-                }
+                    }
+                }, LinearLayout.LayoutParams(-1, -2))
             }
+        }
+        if (records.size > visibleTripCount) {
+            tripPage.addView(action("이전 운행 ${records.size - visibleTripCount}건 더 보기", false) {
+                visibleTripCount += 30
+                renderTripLog()
+            }, LinearLayout.LayoutParams(-1, -2).apply { topMargin = dp(8) })
         }
         updateTripSelectionPopup(records)
     }

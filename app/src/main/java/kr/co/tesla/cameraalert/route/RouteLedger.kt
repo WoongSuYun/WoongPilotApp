@@ -92,7 +92,13 @@ object RouteLedger {
 
     fun matchingStart(context: Context, startedAt: Long, endedAt: Long): Long? {
         val leeway = 15 * 60_000L
-        return records(context).filter { it.endedAt >= startedAt - leeway && it.startedAt <= endedAt + leeway }
+        // Matching a trip card needs only route metadata. Loading every JSONL point file here
+        // made the trip ledger slow in proportion to the total recorded GPS history.
+        return storedRecords(context).asSequence()
+            .mapNotNull { value -> runCatching {
+                RouteRecord(value.getLong("startedAt"), value.getLong("endedAt"), value.getDouble("distanceKm"), emptyList())
+            }.getOrNull() }
+            .filter { it.endedAt >= startedAt - leeway && it.startedAt <= endedAt + leeway }
             .minByOrNull { kotlin.math.abs(it.startedAt - startedAt) + kotlin.math.abs(it.endedAt - endedAt) }?.startedAt
     }
 

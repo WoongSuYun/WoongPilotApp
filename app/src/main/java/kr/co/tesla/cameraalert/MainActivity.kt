@@ -141,7 +141,6 @@ class MainActivity : AppCompatActivity() {
             onGeminiSettings = { showGeminiVoiceSettings() },
             onGeminiAudioLibrary = { showGeminiAudioLibrary() },
             onSafetyAlertSettings = { showSafetyAlertSettings() },
-            onSpeedCameraAlertSettings = { showSpeedCameraAlertSettings() },
             onPreviewCameraAlert = { previewCameraAlert() }, onMonitoringSettings = { showMonitoringSettings() },
             onExportTrips = { exportTrips.launch("woongpilot-driving-backup.json") },
             onImportTrips = { importTrips.launch(arrayOf("application/json", "text/plain")) },
