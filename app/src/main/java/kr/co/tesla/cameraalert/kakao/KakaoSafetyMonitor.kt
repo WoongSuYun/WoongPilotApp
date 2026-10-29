@@ -28,10 +28,11 @@ class KakaoSafetyMonitor : KNGuidance_SafetyGuideDelegate, KNGuidance_LocationGu
     private var latest = emptyList<KNSafety>()
     private var updatedAt: Long? = null
     private var busLaneGuideAt: Long? = null
+    private var overspeedAlertAllowedUntil = 0L
 
-    var onSafetyVoiceRequested: ((SafetyMatch) -> Unit)? = null
-    /** True means the app deliberately delegates this guidance voice to KNSDK. */
-    var useKakaoVoice: (() -> Boolean)? = null
+    var onSafetyVoiceRequested: ((SafetyMatch, Boolean) -> Unit)? = null
+    var useKakaoVoice: ((SafetyMatch) -> Boolean)? = null
+    var useKakaoOverspeedAlert: (() -> Boolean)? = null
 
     suspend fun start(application: Application) {
         KakaoRuntime.prepare(application)
@@ -44,7 +45,12 @@ class KakaoSafetyMonitor : KNGuidance_SafetyGuideDelegate, KNGuidance_LocationGu
         guide.voiceGuideDelegate = this
         guide.useDirSound = false
         guide.useBackgroundUpdate = true
-        guide.judgeOverSpeedAlert = { _, _, _, _, _ -> false }
+        guide.judgeOverSpeedAlert = { code, _, _, _, _ ->
+            val allowed = alertType(code) == SafetyAlertType.SPEED_CAMERA &&
+                useKakaoOverspeedAlert?.invoke() == true
+            overspeedAlertAllowedUntil = if (allowed) SystemClock.elapsedRealtime() + 3_000 else 0L
+            allowed
+        }
         guide.startWithTrip(null, KNRoutePriority.KNRoutePriority_Recommand, 0)
     }
 
@@ -94,15 +100,26 @@ class KakaoSafetyMonitor : KNGuidance_SafetyGuideDelegate, KNGuidance_LocationGu
         voiceGuide: KNGuide_Voice,
         strings: MutableList<ByteArray>
     ): Boolean {
-        if (useKakaoVoice?.invoke() == true) return true
         val busLane = voiceGuide.voiceCode == KNVoiceCode.KNVoiceCode_BusLaneGuide
+        if (voiceGuide.voiceCode == KNVoiceCode.KNVoiceCode_Alert) {
+            val allowed = SystemClock.elapsedRealtime() <= overspeedAlertAllowedUntil
+            overspeedAlertAllowedUntil = 0L
+            return allowed
+        }
+        if (!busLane && voiceGuide.voiceCode != KNVoiceCode.KNVoiceCode_Safety) return false
         if (busLane) busLaneGuideAt = SystemClock.elapsedRealtime()
-        // This is KNSDK's final map-matched decision. Suppress its audio and substitute ours.
         val event = if (busLane) busLaneGuideAt?.let {
             SafetyMatch("kakao_bus_lane_$it", SafetyAlertType.BUS_LANE, 0.0, 0.0, 0.0, null, "Kakao guidance")
-        } else currentSafetyForVoice()
-        event?.let { onSafetyVoiceRequested?.invoke(it) }
-        return false
+        } else {
+            // The SDK may have several safety records nearby.  Never substitute the nearest
+            // selectable item for the item that actually requested this voice guidance.
+            val guidedSafety = voiceGuide.guideObj as? KNSafety ?: return false
+            currentSafetyForVoice()?.takeIf { it.id == "kakao_${guidedSafety.safetyId}" }
+        }
+        if (event == null) return false
+        val play = useKakaoVoice?.invoke(event) == true
+        onSafetyVoiceRequested?.invoke(event, play)
+        return play
     }
 
     override fun willPlayVoiceGuide(guidance: KNGuidance, voiceGuide: KNGuide_Voice) = Unit
@@ -112,6 +129,7 @@ class KakaoSafetyMonitor : KNGuidance_SafetyGuideDelegate, KNGuidance_LocationGu
         running = false
         updatedAt = null
         busLaneGuideAt = null
+        overspeedAlertAllowedUntil = 0L
         safetyReceived = false
         latest = emptyList()
         onSafetyVoiceRequested = null
@@ -143,15 +161,6 @@ class KakaoSafetyMonitor : KNGuidance_SafetyGuideDelegate, KNGuidance_LocationGu
             in speedCodes -> SafetyAlertType.SPEED_CAMERA
             KNSafetyCode.KNSafetyCode_Hump -> SafetyAlertType.SPEED_BUMP
             KNSafetyCode.KNSafetyCode_ChildrenProtectionZone -> SafetyAlertType.CHILDREN_ZONE
-            KNSafetyCode.KNSafetyCode_ChildrenAccidentPos -> SafetyAlertType.CHILDREN_ACCIDENT
-            KNSafetyCode.KNSafetyCode_TrafficAccidentPos,
-            KNSafetyCode.KNSafetyCode_CarAccidentPos,
-            KNSafetyCode.KNSafetyCode_PedestrianAccidentPos -> SafetyAlertType.ACCIDENT_PRONE
-            KNSafetyCode.KNSafetyCode_SharpTurnSection -> SafetyAlertType.SHARP_TURN
-            KNSafetyCode.KNSafetyCode_RailroadCrossing -> SafetyAlertType.RAILROAD_CROSSING
-            KNSafetyCode.KNSafetyCode_SlippingRoad,
-            KNSafetyCode.KNSafetyCode_FrozenRoad,
-            KNSafetyCode.KNSafetyCode_FrozenRoadLive -> SafetyAlertType.SLIPPERY_ROAD
             else -> null
         }
     }

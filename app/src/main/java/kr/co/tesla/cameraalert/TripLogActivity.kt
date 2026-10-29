@@ -42,7 +42,7 @@ class TripLogActivity : AppCompatActivity() {
         trip.batteryStartPercent != null && trip.batteryEndPercent != null ->
             "배터리 ${trip.batteryStartPercent}% → ${trip.batteryEndPercent}% · ${trip.batteryUsedPercent ?: 0}% 사용"
         trip.batteryUsedPercent != null -> "배터리 ${trip.batteryUsedPercent}% 사용"
-        else -> "배터리 변화 없음"
+        else -> trip.telemetryFallbackReason ?: "Tesla 배터리 정보 없음"
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {

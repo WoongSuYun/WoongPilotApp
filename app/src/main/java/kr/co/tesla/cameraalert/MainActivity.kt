@@ -137,9 +137,8 @@ class MainActivity : AppCompatActivity() {
                 prefs.edit().putString("status", "감시 종료 요청 · GPS 경로 확인 중").apply()
             }, onCheckKakao = { checkKakao() }, onTeslaLogin = { TeslaAuth.start(this) },
             onTeslaLogout = { confirmTeslaLogout() }, onWakeTesla = { wakeTeslaAndRefresh() },
-            onRefreshTesla = { startTeslaRefresh() }, onVoiceSettings = { showVoiceSettings() },
-            onGeminiSettings = { showGeminiVoiceSettings() },
-            onGeminiAudioLibrary = { showGeminiAudioLibrary() },
+            onRefreshTesla = { startTeslaRefresh() },
+            onGeminiSettings = {}, onGeminiAudioLibrary = {},
             onSafetyAlertSettings = { showSafetyAlertSettings() },
             onPreviewCameraAlert = { previewCameraAlert() }, onMonitoringSettings = { showMonitoringSettings() },
             onExportTrips = { exportTrips.launch("woongpilot-driving-backup.json") },
@@ -556,12 +555,23 @@ class MainActivity : AppCompatActivity() {
                 })
             }
         }
+        val overspeedTone = Switch(this).apply {
+            text = "단속카메라 제한속도 초과 경고음"
+            textSize = 16f
+            isChecked = SafetyAlertSettings.isOverspeedToneEnabled(this@MainActivity)
+            minHeight = (52 * resources.displayMetrics.density).toInt()
+            setPadding(0, 0, 0, 0)
+        }
+        panel.addView(overspeedTone, LinearLayout.LayoutParams(-1, (52 * resources.displayMetrics.density).toInt()).apply {
+            bottomMargin = (4 * resources.displayMetrics.density).toInt()
+        })
         androidx.appcompat.app.AlertDialog.Builder(this)
             .setTitle("안전 안내 항목 설정")
             .setView(ScrollView(this).apply { addView(panel) })
             .setNegativeButton("취소", null)
             .setPositiveButton("저장") { _, _ ->
                 SafetyAlertSettings.save(this, switches.mapValues { it.value.isChecked })
+                SafetyAlertSettings.saveOverspeedTone(this, overspeedTone.isChecked)
                 status.text = "안전 안내 항목을 저장했습니다. 다음 안내부터 적용됩니다."
             }.show()
     }

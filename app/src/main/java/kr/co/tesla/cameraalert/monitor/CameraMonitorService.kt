@@ -33,6 +33,7 @@ class CameraMonitorService : Service(), LocationListener {
     private var gpsWatchdog: Job? = null
     private var gpsActive = false
     private var lastFix = 0L
+    private var lastVehicleHeading = 0.0
     private lateinit var speaker: AlertSpeaker
     private lateinit var geminiSpeaker: GeminiTts
     private lateinit var sounds: AppSoundPlayer
@@ -149,13 +150,15 @@ class CameraMonitorService : Service(), LocationListener {
                 val monitor = KakaoSafetyMonitor()
                 kakao = monitor
                 try {
-                    monitor.onSafetyVoiceRequested = { event ->
-                        mainHandler.post { if (gpsActive) onKakaoSafetyVoice(event) }
+                    monitor.onSafetyVoiceRequested = { event, kakaoVoiceWillPlay ->
+                        mainHandler.post { if (gpsActive) onKakaoSafetyVoice(event, kakaoVoiceWillPlay) }
                     }
-                    monitor.useKakaoVoice = {
-                        // Gemini is an explicit replacement mode. When it is off, preserve
-                        // KNSDK's original voice and its exact timing instead of using phone TTS.
-                        !geminiSpeaker.isEnabled() && !isMuted()
+                    monitor.useKakaoVoice = { event ->
+                        SafetyAlertSettings.isEnabled(this@CameraMonitorService, event.type) && !isMuted()
+                    }
+                    monitor.useKakaoOverspeedAlert = {
+                        SafetyAlertSettings.isEnabled(this@CameraMonitorService, SafetyAlertType.SPEED_CAMERA) &&
+                            SafetyAlertSettings.isOverspeedToneEnabled(this@CameraMonitorService) && !isMuted()
                     }
                     prefs.edit().putString("kakao_status", "카카오 안전 운행 연결 중…").apply()
                     monitor.start(application)
@@ -196,8 +199,12 @@ class CameraMonitorService : Service(), LocationListener {
         // fresh GPS fix fail the five-second age check above.
         RouteLedger.observe(this, fix)
         lastFix = SystemClock.elapsedRealtime()
+        val position = VehiclePosition(fix.latitude, fix.longitude,
+            if (fix.hasBearing()) fix.bearing.toDouble() else lastVehicleHeading, fix.speed * 3.6, fix.time)
         mainHandler.post {
             if (!gpsActive) return@post
+            lastVehicleHeading = position.heading
+            updateActiveSpeedCamera(position)
             val source = if (kakao?.healthy(isOnline()) == true) "카카오 안전 운행 중" else "카카오 안전 운행 연결 대기"
             prefs.edit().putString("camera_source", source).apply()
             status("${(fix.speed * 3.6).toInt()}km/h · $source")
@@ -205,7 +212,7 @@ class CameraMonitorService : Service(), LocationListener {
     }
 
     /** KNSDK's own map-matched voice decision; local GPS never creates an alert. */
-    private fun onKakaoSafetyVoice(match: SafetyMatch) {
+    private fun onKakaoSafetyVoice(match: SafetyMatch, kakaoVoiceWillPlay: Boolean) {
         if (!SafetyAlertSettings.isEnabled(this, match.type)) return
         val distance = match.distanceMeters.toInt().coerceAtLeast(1)
         val detail = buildString {
@@ -215,6 +222,17 @@ class CameraMonitorService : Service(), LocationListener {
         }
         status(detail)
         CameraAlertNotification.show(this, detail)
+        if (match.type == SafetyAlertType.SPEED_CAMERA && match.limitKph != null &&
+            prefs.getBoolean("floating_alert_enabled", false)) {
+            val tracked = activeSpeedCamera
+            if (tracked == null || tracked.id != match.id) {
+                activeSpeedCamera = ActiveSpeedCamera(match.id, match.latitude, match.longitude, match.limitKph,
+                    lastVehicleHeading, match.distanceMeters, match.distanceMeters)
+                activeCameraId = match.id
+            }
+            CameraAlertOverlay.show(this, distance, match.limitKph, keepVisible = true)
+        }
+        if (kakaoVoiceWillPlay) return
         if (!isMuted()) scope.launch {
             val geminiSpoken = runCatching {
                 geminiSpeaker.speakSafetyWarning(match.type, distance, match.limitKph)

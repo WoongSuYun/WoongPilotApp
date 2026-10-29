@@ -15,7 +15,9 @@ data class TripRecord(
     val routeStartedAts: List<Long> = routeStartedAt?.let(::listOf).orEmpty(), val mergedPartCount: Int = 0,
     /** Distance whose battery use was measurable; this may exclude 0 kWh short trips. */
     val efficiencyDistanceKm: Double? = null,
-    val countsTowardLifetime: Boolean = true
+    val countsTowardLifetime: Boolean = true,
+    /** Why this card had to use GPS distance instead of Tesla battery telemetry. */
+    val telemetryFallbackReason: String? = null
 )
 
 /** Small app-private trip ledger. Odometer is the source of truth for trip distance. */
@@ -69,11 +71,18 @@ object TripLedger {
     }
 
     /** Saves a phone-GPS trip when Tesla telemetry is unavailable. Battery values intentionally stay empty. */
-    fun recordGpsTrip(context: Context, vin: String, route: RouteRecord?, countsTowardLifetime: Boolean = true): TripRecord? {
+    fun recordGpsTrip(
+        context: Context,
+        vin: String,
+        route: RouteRecord?,
+        countsTowardLifetime: Boolean = true,
+        telemetryFallbackReason: String? = null
+    ): TripRecord? {
         route ?: return null
         prefs(context).edit().remove(ACTIVE).apply()
         val record = TripRecord(vin, route.startedAt, route.endedAt, route.distanceKm,
-            null, null, null, null, null, route.startedAt, countsTowardLifetime = countsTowardLifetime)
+            null, null, null, null, null, route.startedAt, countsTowardLifetime = countsTowardLifetime,
+            telemetryFallbackReason = telemetryFallbackReason)
         append(context, record)
         return record
     }
@@ -230,7 +239,7 @@ object TripLedger {
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 estimatedKwh(value), efficiencyKmPerKwh(value),
                 batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value),
-                efficiencyDistanceKm(value), countsTowardLifetime(value))
+                efficiencyDistanceKm(value), countsTowardLifetime(value), telemetryFallbackReason(value))
         }.sortedByDescending { it.startedAt }
     }
 
@@ -286,7 +295,7 @@ object TripLedger {
                 value.getDouble("distanceKm"), if (value.isNull("batteryUsedPercent")) null else value.getInt("batteryUsedPercent"),
                 estimatedKwh(value), efficiencyKmPerKwh(value),
                 batteryStartPercent(value), batteryEndPercent(value), routeStartedAt(value), routeStartedAts(value), mergedPartCount(value),
-                efficiencyDistanceKm(value), countsTowardLifetime(value)) }.getOrNull()
+                efficiencyDistanceKm(value), countsTowardLifetime(value), telemetryFallbackReason(value)) }.getOrNull()
         }
     }
     private fun append(context: Context, record: TripRecord) {
@@ -311,6 +320,7 @@ object TripLedger {
         put("routeStartedAts", JSONArray(record.routeStartedAts)); put("mergedPartCount", record.mergedPartCount)
         put("efficiencyDistanceKm", record.efficiencyDistanceKm)
         put("countsTowardLifetime", record.countsTowardLifetime)
+        put("telemetryFallbackReason", record.telemetryFallbackReason)
     }
     private fun saveAll(context: Context, values: List<TripRecord>) {
         val json = JSONArray()
@@ -383,6 +393,8 @@ object TripLedger {
     }?.takeIf { it.isNotEmpty() } ?: routeStartedAt(value)?.let(::listOf).orEmpty()
     private fun mergedPartCount(value: JSONObject): Int = value.optInt("mergedPartCount", 0)
     private fun countsTowardLifetime(value: JSONObject): Boolean = value.optBoolean("countsTowardLifetime", true)
+    private fun telemetryFallbackReason(value: JSONObject): String? =
+        value.optString("telemetryFallbackReason").takeIf { it.isNotBlank() }
     private fun efficiencyDistanceKm(value: JSONObject): Double? {
         if (!value.isNull("efficiencyDistanceKm")) return value.optDouble("efficiencyDistanceKm").takeIf { it > 0 }
         // Repair the calculation for merged cards created before efficiencyDistanceKm existed.

@@ -20,11 +20,6 @@ enum class SafetyAlertType(
     SPEED_CAMERA("과속·신호 단속 카메라", true, 700.0),
     SPEED_BUMP("과속 방지턱", true, 180.0),
     CHILDREN_ZONE("어린이 보호구역", true, 350.0),
-    CHILDREN_ACCIDENT("어린이 사고 다발 구간", false, 350.0),
-    ACCIDENT_PRONE("교통사고 다발 구간", false, 450.0),
-    SHARP_TURN("급회전 구간", false, 300.0),
-    RAILROAD_CROSSING("철도 건널목", false, 300.0),
-    SLIPPERY_ROAD("미끄럼 주의 구간", false, 350.0),
     BUS_LANE("버스전용차로", false, 500.0);
 
     fun spokenText(distanceMeters: Int, limitKph: Int?): String {
@@ -33,11 +28,6 @@ enum class SafetyAlertType(
             SPEED_CAMERA -> "전방 ${distance}미터, 제한속도 ${(limitKph ?: 0).coerceAtLeast(1)}킬로미터, 과속 단속 카메라입니다."
             SPEED_BUMP -> "전방 ${distance}미터, 과속 방지턱이 있습니다."
             CHILDREN_ZONE -> "전방 ${distance}미터, 어린이 보호구역입니다."
-            CHILDREN_ACCIDENT -> "전방 ${distance}미터, 어린이 사고 다발 구간입니다."
-            ACCIDENT_PRONE -> "전방 ${distance}미터, 교통사고 다발 구간입니다."
-            SHARP_TURN -> "전방 ${distance}미터, 급회전 구간입니다."
-            RAILROAD_CROSSING -> "전방 ${distance}미터, 철도 건널목이 있습니다."
-            SLIPPERY_ROAD -> "전방 ${distance}미터, 미끄럼 주의 구간입니다."
             BUS_LANE -> "버스전용차로 구간입니다. 차로를 확인하세요."
         }
     }

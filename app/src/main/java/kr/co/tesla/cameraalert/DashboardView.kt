@@ -26,7 +26,7 @@ import java.util.Locale
 class DashboardView(context: Context, savedTeslaName: String,
     onStart: () -> Unit, onStop: () -> Unit,
     onCheckKakao: () -> Unit, onTeslaLogin: () -> Unit, onTeslaLogout: () -> Unit,
-    onWakeTesla: () -> Unit, onRefreshTesla: () -> Unit, onVoiceSettings: () -> Unit,
+    onWakeTesla: () -> Unit, onRefreshTesla: () -> Unit,
     onGeminiSettings: () -> Unit, onGeminiAudioLibrary: () -> Unit, onSafetyAlertSettings: () -> Unit,
     onPreviewCameraAlert: () -> Unit, onMonitoringSettings: () -> Unit,
     private val onExportTrips: () -> Unit, private val onImportTrips: () -> Unit,
@@ -215,17 +215,6 @@ class DashboardView(context: Context, savedTeslaName: String,
             space(5)
             addView(text("카메라 알림", 28f, ink, true))
         }, LinearLayout.LayoutParams(0, -2, 1f))
-        top.addView(action("?", false) {
-            AlertDialog.Builder(context).setTitle("처음 사용하는 방법")
-                .setMessage("1. 감시 시작을 누르거나 삼성 모드 및 루틴에서 ‘웅파일럿 감시 시작’을 실행하세요.\n\n2. 위치·속도는 휴대폰 GPS를 사용합니다. Bluetooth 연결 해제 조건에는 ‘웅파일럿 감시 종료’를 설정할 수 있습니다.\n\n3. 공공 카메라 데이터는 앱에서 업데이트할 수 있습니다.\n\n앱 강제 종료나 재부팅 후에는 감시를 다시 시작하세요.")
-                .setPositiveButton("확인", null).show()
-        }.apply { contentDescription = "앱 사용 방법" }, LinearLayout.LayoutParams(dp(48), dp(48)))
-        top.addView(action("✎", false) { showHeaderMessageSettings() }.apply {
-            contentDescription = "상단 문구 설정"
-        }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) })
-        top.addView(action("⚙", false, onVoiceSettings).apply {
-            contentDescription = "음성 안내 설정"
-        }, LinearLayout.LayoutParams(dp(48), dp(48)).apply { marginStart = dp(4) })
         body.addView(top); body.space(16)
         val tabs = row()
         fun tab(id: String, label: String) = action(label, false) { showTab(id) }.also {
@@ -335,7 +324,7 @@ class DashboardView(context: Context, savedTeslaName: String,
             space(8)
         }
         card(guidePage).apply {
-            heading(this, "02", "카카오 안전 안내", "목적지 없이 · 과속카메라 안내")
+            heading(this, "02", "안내", "안전 안내 · 차계부")
             space(16)
             kakaoStatus.textSize = 14f; kakaoStatus.setTextColor(ink)
             kakaoStatus.setLineSpacing(dp(3).toFloat(), 1f)
@@ -343,10 +332,7 @@ class DashboardView(context: Context, savedTeslaName: String,
             addView(action("카카오 실시간 응답 테스트", false, onCheckKakao), LinearLayout.LayoutParams(-1, -2))
         }
         card(guidePage).apply {
-            heading(this, "02", "안내와 음성", "안전 안내 · Gemini 음성 · 차계부")
             space(16)
-            addView(action("Gemini AI 음성 설정", false, onGeminiSettings), LinearLayout.LayoutParams(-1, -2)); space(8)
-            addView(action("Gemini 음성 보관함", false, onGeminiAudioLibrary), LinearLayout.LayoutParams(-1, -2)); space(8)
             addView(action("안전 안내 항목 설정", false, onSafetyAlertSettings), LinearLayout.LayoutParams(-1, -2))
         }
         guidePage.addView(text("차량 연결 없이도 휴대폰 GPS·카카오 안전 안내를 사용할 수 있어요.\n화면을 꺼도 실행 중인 감시는 계속됩니다.", 12f, muted).apply {
